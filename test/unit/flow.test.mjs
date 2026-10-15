@@ -88,6 +88,7 @@ test('網站錯誤的處理方式', () => {
   assert.equal(classifyError('INSUFFICIENT'), 'next-slot');
   assert.equal(classifyError('NOT_ON_SALE'), 'wait');
   assert.equal(classifyError('HOLD_EXPIRED'), 'restart');
+  assert.equal(classifyError('TOKEN_EXPIRED'), 'reload');
   assert.equal(classifyError('QUEUE_REQUIRED'), 'gate');
   assert.equal(classifyError('CAPTCHA_WRONG'), 'gate');
   assert.equal(classifyError('BOTCHECK_REQUIRED'), 'gate');

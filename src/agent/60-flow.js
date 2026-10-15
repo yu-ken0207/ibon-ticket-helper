@@ -30,16 +30,26 @@
     return state.aborted || state.left ? null : r;
   }
 
-  /** 等時段列表讀完（成功或失敗）；逾時回傳 null */
-  async function waitList(maxMs) {
+  /**
+   * 等時段列表讀完（成功或失敗）；逾時回傳 null。
+   * prevStamp 是按「更新狀態」之前的第一列：舊的列還留在畫面上時不算讀完，要等換成新的（或出現錯誤）。
+   */
+  async function waitList(maxMs, prevStamp = null) {
     const t0 = Date.now();
     while (Date.now() - t0 < maxMs) {
-      if (state.aborted) return null;
+      if (state.aborted || state.left) return null;
       const s = SITE.listState();
-      if (!s.loading && (s.error || s.slots)) return s;
+      if (!s.loading && (s.error || (s.slots && s.stamp !== prevStamp))) return s;
       await sleep(100);
     }
     return null;
+  }
+
+  /** 按「更新狀態」，回傳按之前的第一列（給 waitList 分辨新舊） */
+  function refreshList() {
+    const before = SITE.listState().stamp;
+    SITE.refreshList();
+    return before;
   }
 
   /**
@@ -67,6 +77,13 @@
         const r = await grant('fail', what);
         if (!r) return finish(false, 'fail-limit', `${what}，重試次數用完了`, { handOff: true });
         continue;   // 前一次確定失敗了，才再送一次
+      }
+      if (action === 'reload') {
+        // 表單權杖過期之類：重新整理這一頁拿新的，這一步會重新做一次（有次數上限）
+        const r = await grant('fail', what);
+        if (!r) return finish(false, 'fail-limit', `${what}，重試次數用完了`, { handOff: true });
+        location.reload();
+        return;
       }
       if (action === 'duplicate') {
         // 網站說已經收到了：上一次其實送到了，不要再送，往下一步看看
@@ -101,9 +118,10 @@
   async function onList(d) {
     const cfg = d.cfg || {};
     const need = totalWanted(cfg);
+    let prev = null;
     for (;;) {
       if (state.aborted || state.left) return;
-      const ls = await waitList(30000);
+      const ls = await waitList(30000, prev);
       if (!ls) {
         const r = await grant('load', '時段列表等了 30 秒還沒出來');
         if (!r) return finish(false, 'list-timeout', '時段列表一直沒有出來，先停下來', { handOff: true });
@@ -113,7 +131,7 @@
       if (ls.error) {
         const r = await grant('load', `時段載入失敗：${ls.error.replace(/。請按.*$/, '')}`, ls.status);
         if (!r) return finish(false, 'load-limit', `${ls.error}。連續 5 分鐘都沒有恢復，先停下來`, { handOff: true });
-        SITE.refreshList();
+        prev = refreshList();
         await sleep(50);
         continue;
       }
@@ -128,7 +146,7 @@
       if (pick.kind === 'not-open') {
         const r = await grant('not-open', describePick(pick, need));
         if (!r) return finish(false, 'not-open-limit', `${describePick(pick, need)}，重試次數用完了`);
-        SITE.refreshList();
+        prev = refreshList();
         await sleep(50);
         continue;
       }
@@ -328,9 +346,9 @@
         const odd = ls.slots.filter((s) => !['available', 'limited', 'full', 'not-open'].includes(s.status));
         add('status', '時段狀態判讀', odd.length ? 'warn' : 'ok', odd.length ? `${odd.length} 個看不出狀態` : '都認得');
         const buy = ls.slots.find(isBuyable);
-        add('buy', '選購按鈕', !buy ? 'skip' : buy.el && buy.el.querySelector('a[data-testid=slot-buy]') ? 'ok' : 'fail', buy ? '' : '目前沒有能買的時段');
+        add('buy', '選購按鈕', !buy ? 'skip' : buy.el && buy.el.querySelector('a[href*="/select/"]') ? 'ok' : 'fail', buy ? '' : '目前沒有能買的時段');
       }
-      add('refresh', '更新狀態按鈕', $('[data-testid=refresh-status]') ? 'ok' : 'warn');
+      add('refresh', '更新狀態按鈕', buttonByText('更新狀態') ? 'ok' : 'warn');
       add('prices', '票價表', SITE.prices().length ? 'ok' : 'warn', SITE.prices().map((x) => x.name).join('、'));
     }
     const worst = items.some((i) => i.status === 'fail') ? 'fail' : items.some((i) => i.status === 'warn') ? 'warn' : 'ok';

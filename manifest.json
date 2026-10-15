@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "一般票券訂票助手",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "一般票券的購票輔助：照你的偏好選時段與張數、填你提供的購票人資料，停在確認頁由你自己確認。遇到排隊、驗證碼、機器人檢查一律停下來交給你。目前只支援本機的一般票券模擬站。",
   "minimum_chrome_version": "111",
   "permissions": ["storage", "alarms", "notifications", "tabs"],

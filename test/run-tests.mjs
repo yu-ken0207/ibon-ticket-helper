@@ -1,7 +1,8 @@
 // 端對端測試：本機一般票券模擬站（ticket-sim 以 SIM_SITE=pool 啟動）＋ Playwright 的 Chromium 載入真的擴充功能。
 // 每個情境除了看擴充功能的任務狀態，也用模擬站的統計核對：有沒有重複送出、有沒有替使用者按「確認建立訂單」。
 //
-// 用法：node test/run-tests.mjs [--only 情境[,情境…]] [--headed]
+// 用法：node test/run-tests.mjs [--only 情境[,情境…]] [--mode normal|hard|both] [--headed]
+//   每個情境預設在模擬站的一般模式與困難模式（hard=1：沒有測試錨點、封閉 Shadow DOM、受控表單、表單權杖、canvas 驗證碼）各跑一次
 //   需要 ticket-sim（預設 ../ticket-sim，可用 SIM_DIR 指定）；playwright 預設從 ticket-sim/tools 載入，可用 PW_DIR 指定
 import fs from 'node:fs';
 import os from 'node:os';
@@ -19,6 +20,9 @@ const { chromium } = createRequire(PW_DIR)('playwright');
 const argv = process.argv.slice(2);
 const ONLY = argv.includes('--only') ? new Set(argv[argv.indexOf('--only') + 1].split(',')) : null;
 const HEADED = argv.includes('--headed');
+const MODE = argv.includes('--mode') ? argv[argv.indexOf('--mode') + 1] : 'both';
+const MODES = MODE === 'both' ? ['normal', 'hard'] : [MODE];
+let HARD = false;   // 目前這一輪是不是困難模式
 const PORT = Number(process.env.POOL_PORT || 3300 + Math.floor(Math.random() * 300));
 const BASE = `http://127.0.0.1:${PORT}`;
 const WORK = fs.mkdtempSync(path.join(process.env.ITH_TMP || process.env.KKH_TMP || os.tmpdir(), 'ith-test-'));
@@ -75,7 +79,8 @@ async function launch() {
 async function scenario(ctx, preset, query = '') {
   await fetch(`${BASE}/pool/api/_test/default`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ preset: 'normal' }) });
   // 只拿 cookie、不跟著轉到時段列表：不然那一頁會先讀一次時段（用掉錯誤次數、提早開始排隊計時）
-  const res = await ctx.request.get(`${BASE}/pool/scenarios/start?preset=${preset}${query ? '&' + query : ''}`, { maxRedirects: 0 });
+  const q = [query, HARD ? 'hard=1' : ''].filter(Boolean).join('&');
+  const res = await ctx.request.get(`${BASE}/pool/scenarios/start?preset=${preset}${q ? '&' + q : ''}`, { maxRedirects: 0 });
   if (res.status() !== 303) throw new Error(`開始情境 ${preset} 失敗：${res.status()}`);
 }
 
@@ -140,7 +145,8 @@ const SCENARIOS = [
       const s = await waitTask(popup, ready, 40000);
       const st = await siteState(ctx);
       const page = sitePage(ctx);
-      const outlined = page ? await page.evaluate(() => document.querySelector('[data-testid=confirm-order]').style.outline) : '';
+      const confirmBtn = page && page.getByRole('button', { name: '確認建立訂單' });
+      const outlined = confirmBtn ? await confirmBtn.evaluate((b) => b.style.outline) : '';
       const checks = [
         ['已開始執行', /已開始執行/.test(msg), msg],
         ['停在確認頁等使用者', ready(s.task) && /自己按「確認建立訂單」/.test(s.task.result.msg), resultMsg(s)],
@@ -152,7 +158,7 @@ const SCENARIOS = [
         ...noDuplicates(st),
       ];
       // 使用者自己按確認
-      await page.click('[data-testid=confirm-order]');
+      await confirmBtn.click();
       const s2 = await waitTask(popup, (t) => t.phase === 'done', 15000);
       const st2 = await siteState(ctx);
       checks.push(['使用者確認後記成成功', s2.task.result && s2.task.result.ok && s2.task.result.kind === 'ordered', resultMsg(s2)]);
@@ -281,6 +287,23 @@ const SCENARIOS = [
     },
   },
   {
+    name: 'token-expired',
+    title: '表單權杖過期：重新整理拿新的權杖，再送一次（有次數上限）',
+    async run({ ctx, popup }) {
+      await scenario(ctx, 'token-expired');
+      await fillPopup(popup);
+      await clickAndRead(popup, '#btnRunNow');
+      const s = await waitTask(popup, ready, 40000);
+      const st = await siteState(ctx);
+      return [
+        ['停在確認頁等使用者', ready(s.task), resultMsg(s)],
+        ['被拒一次、重新整理後成功', st.stats.holdRequests === 2 && st.stats.holds === 1 && s.task.fail === 1, `請求 ${st.stats.holdRequests}、成功 ${st.stats.holds}、重試 ${s.task.fail}`],
+        ['重新整理過選票頁', (st.stats.pages.select || 0) >= 2, `選票頁載入 ${st.stats.pages.select || 0} 次`],
+        ...noDuplicates(st),
+      ];
+    },
+  },
+  {
     name: 'slow',
     title: '回應很慢（每個 API 慢 3 秒）：耐心等，不會因為等太久又按一次',
     async run({ ctx, popup }) {
@@ -324,7 +347,7 @@ const SCENARIOS = [
       const s = await waitTask(popup, ready, 40000);
       const st = await siteState(ctx);
       const page = sitePage(ctx);
-      const typed = page ? await page.inputValue('[data-testid=captcha-input]') : '?';
+      const typed = page ? await page.getByLabel('驗證碼', { exact: true }).inputValue() : '?';
       return [
         ['停下來並提到驗證碼', ready(s.task) && /輸入驗證碼/.test(s.task.result.msg), resultMsg(s)],
         ['驗證碼欄位沒有被填', typed === '', `欄位內容「${typed}」`],
@@ -444,7 +467,8 @@ const SCENARIOS = [
       await sleep(500);
       const s = await status(popup);
       return [
-        ['說明會選哪一個時段', /開賣時會選「11\/20（五） 06:00–08:00」（目前可購買，剩 80 張）/.test(check), check],
+        // 畫面上「可購買」不寫剩幾張（只有「剩少量」會寫），助手只看畫面，所以不會有張數
+        ['說明會選哪一個時段', /開賣時會選「11\/20（五） 06:00–08:00」（目前可購買）/.test(check), check],
         ['列出供應狀態', /共 15 個時段：可購買 13、已額滿 2/.test(check), ''],
         ['列出票價', /票價：全票 NT\$110、優待票 NT\$80、兒童票 NT\$60/.test(check), ''],
         ['健檢全部正常', /全部正常/.test(health) && items.length >= 5 && items.every((c) => c === 'ok'), `${health}｜${items.join(',')}`],
@@ -465,8 +489,10 @@ async function main() {
   const sim = await startSim();
   const results = [];
   try {
-    for (const sc of SCENARIOS) {
+    for (const mode of MODES) for (const sc of SCENARIOS) {
       if (ONLY && !ONLY.has(sc.name)) continue;
+      HARD = mode === 'hard';
+      const label = `${sc.name}${HARD ? '［困難］' : ''}`;
       const t0 = Date.now();
       let checks = [];
       let error = null;
@@ -484,7 +510,7 @@ async function main() {
       }
       const pass = !error && checks.length > 0 && checks.every((c) => c[1]);
       results.push({ sc, pass });
-      console.log(`\n${pass ? 'PASS' : 'FAIL'}  ${sc.name}：${sc.title}（${((Date.now() - t0) / 1000).toFixed(1)} 秒）`);
+      console.log(`\n${pass ? 'PASS' : 'FAIL'}  ${label}：${sc.title}（${((Date.now() - t0) / 1000).toFixed(1)} 秒）`);
       for (const [label, ok, detail] of checks) console.log(`   ${ok ? '✓' : '✗'} ${label}${detail ? '　' + detail : ''}`);
       if (error) console.log('   ✗ 執行錯誤：' + (error.stack || error));
       if (!pass) for (const l of logs.slice(-15)) console.log(`     log ${new Date(l.at).toISOString().slice(11, 23)} [${l.level}] ${l.msg}`);

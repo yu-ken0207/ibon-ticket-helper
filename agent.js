@@ -263,6 +263,7 @@
    *   next-slot  這個時段買不到（售完、剩餘不足）：換下一個偏好的時段
    *   wait       還沒開賣：等一下重新看
    *   restart    保留逾時、步驟對不上：回到時段列表重來
+   *   reload     表單權杖過期：重新整理這一頁拿新的，再做一次
    *   gate       排隊、驗證碼、機器人檢查：停下來交給你
    *   duplicate  網站說重複送出：上一次其實已經送到了，不要再送
    *   stop       資料有問題或認不得的錯誤：停下來交給你
@@ -273,6 +274,7 @@
     if (['SOLD_OUT', 'INSUFFICIENT'].includes(c)) return 'next-slot';
     if (c === 'NOT_ON_SALE') return 'wait';
     if (['HOLD_EXPIRED', 'STEP_VIOLATION'].includes(c)) return 'restart';
+    if (['TOKEN_EXPIRED', 'FORM_EXPIRED', 'CSRF'].includes(c)) return 'reload';
     if (/QUEUE|CAPTCHA|BOTCHECK|CHALLENGE/.test(c)) return 'gate';
     if (c === 'DUPLICATE_SUBMIT') return 'duplicate';
     if (!c && (status >= 500 || status === 429)) return 'retry';
@@ -314,14 +316,86 @@
     return `關鍵字對不到任何時段。頁面上的時段有：${listNames(p.names)}${fallback ? '。你開了遞補，開賣時會改選第一個能買的時段' : '。請在開賣前修改關鍵字'}`;
   }
 
+  /* ───────────────────────── 語意定位 ─────────────────────────
+   * 真實網站不會給程式用的固定錨點，class、id、欄位名稱也可能每次不同。這裡用「人看得到、網站也不太會改」的線索找元素：
+   * 看得到的文字、標籤與欄位的對應（<label for> 或包住欄位，標準的 label.control）、表單欄位、ARIA 屬性、網址。
+   * 封閉的 Shadow DOM 用擴充功能才有的 chrome.dom.openOrClosedShadowRoot 讀；網頁自己的程式拿不到，擴充功能可以。 */
+
+  /** 元素的 shadow root：開放或封閉都拿得到；不是 shadow host 就是 null */
+  function shadowOf(el) {
+    try {
+      if (typeof chrome !== 'undefined' && chrome.dom && chrome.dom.openOrClosedShadowRoot) return chrome.dom.openOrClosedShadowRoot(el) || null;
+    } catch (_) { /* 不是 HTMLElement 之類 */ }
+    return el.shadowRoot || null;
+  }
+
+  /** 連同所有 Shadow DOM（包括封閉的）一起找 */
+  function deepAll(selector, root = document) {
+    const out = [];
+    const walk = (node) => {
+      out.push(...node.querySelectorAll(selector));
+      for (const el of node.querySelectorAll('*')) {
+        const sr = shadowOf(el);
+        if (sr) walk(sr);
+      }
+    };
+    walk(root);
+    return out;
+  }
+
+  const textOf = (el) => norm(el ? (el.innerText || el.textContent) : '');
+  const hit = (t, match) => (match instanceof RegExp ? match.test(t) : t.includes(match));
+
+  /** 看得到、文字符合的元素（字串＝包含，或正規表示式） */
+  function byText(selector, match, root = document) {
+    return deepAll(selector, root).filter((el) => isVisible(el) && hit(textOf(el), match));
+  }
+
+  /** 照按鈕上的字找按鈕（button、role=button、連結） */
+  function buttonByText(match, root = document) {
+    return byText('button, [role="button"], a, input[type="submit"], input[type="button"]', match, root)[0] || null;
+  }
+
+  /** 照標籤文字找欄位：完全相同優先，再來是開頭相同，最後是正規表示式 */
+  function fieldByLabel(match, root = document) {
+    const labels = deepAll('label', root);
+    const pick = (ok) => {
+      for (const label of labels) {
+        if (!ok(textOf(label))) continue;
+        const c = label.control || label.querySelector('input, select, textarea');
+        if (c) return c;
+      }
+      return null;
+    };
+    if (match instanceof RegExp) return pick((t) => match.test(t));
+    return pick((t) => t === match) || pick((t) => t.startsWith(match));
+  }
+
+  /** 欄位旁邊的錯誤訊息：同一個欄位容器裡看得到的 role=alert */
+  function alertNear(control) {
+    const box = control && control.closest('div');
+    const el = box ? [...box.querySelectorAll('[role="alert"]')].find((a) => !a.hidden && isVisible(a) && textOf(a)) : null;
+    return el ? textOf(el) : '';
+  }
+
+  /** 按鈕那一列正上方的訊息（表單層級的錯誤通常放在送出按鈕上面） */
+  function alertAbove(button) {
+    const row = button && button.parentElement;
+    const prev = row && row.previousElementSibling;
+    return prev && prev.getAttribute('role') === 'alert' && !prev.hidden && isVisible(prev) ? textOf(prev) : '';
+  }
   /* ───────────────────────── 網站轉接：本機一般票券模擬站 ─────────────────────────
    * ticket-sim 用 SIM_SITE=pool 啟動的本機測試網站（虛構的游泳池單次入場票）。
-   * 這是唯一知道它頁面長什麼樣子的地方，錨點照 ticket-sim README「給擴充功能的錨點與 API」。
+   * 只用語意線索（05-dom.js）：網址判斷是哪一頁，文字找按鈕與狀態，標籤找欄位，選票欄位用 name。
+   * 不靠 data-testid，所以模擬站的困難模式（沒有測試錨點、封閉 Shadow DOM、隨機 id 與欄位名稱）也能用。
    * 通用流程只呼叫這裡的函式；要支援別的網站，就照同樣的函式再寫一支。 */
+  const STATUS_WORDS = [['已額滿', 'full'], ['尚未開放', 'not-open'], ['剩少量', 'limited'], ['可購買', 'available']];
+  const statusFromText = (t) => (STATUS_WORDS.find(([w]) => t.includes(w)) || [null, 'unknown'])[1];
+
   const POOL = {
     id: 'pool',
 
-    /** 這一頁是不是模擬站 */
+    /** 這一頁是不是模擬站（模擬站自己在 meta 標示） */
     matches: () => !!$('meta[name="sim-site"][content="pool"]'),
 
     listUrl: () => `${location.origin}/pool/`,
@@ -329,10 +403,17 @@
     /** 某一步送出成功後會到哪一頁（網站說「重複送出」時，直接去下一步看） */
     nextUrl: (step) => `${location.origin}/pool/${step === 'select' ? 'info' : 'confirm'}`,
 
-    /** list 時段列表、select 選票、info 填資料、confirm 確認、done 完成、queue 排隊、error 錯誤頁，其他是 other */
+    /** 錯誤頁網址不變，先看標題；其他看網址 */
     pageKind() {
-      const k = document.body && document.body.dataset.poolPage;
-      return ['list', 'select', 'info', 'confirm', 'done', 'queue', 'error'].includes(k) ? k : 'other';
+      if (/^(系統發生錯誤|無法完成這個動作)$/.test(textOf($('main h1')))) return 'error';
+      const p = location.pathname;
+      if (/^\/pool\/?$/.test(p)) return 'list';
+      if (/^\/pool\/select\/[^/]+$/.test(p)) return 'select';
+      if (p === '/pool/info') return 'info';
+      if (p === '/pool/confirm') return 'confirm';
+      if (/^\/pool\/done\/[^/]+$/.test(p)) return 'done';
+      if (p === '/pool/queue') return 'queue';
+      return 'other';
     },
 
     /** 網站在訊息最後附上錯誤代碼「（SOLD_OUT）」；狀態碼「（503）」也讀出來 */
@@ -343,116 +424,131 @@
       return { text: t, code, status };
     },
 
-    visibleText(sel) {
-      const el = $(sel);
-      return el && !el.hidden && isVisible(el) ? norm(el.textContent) : '';
-    },
-
     /* ── 時段列表 ── */
 
-    /** { loading, error, status, slots }：slots 是 { id, text, status, remaining, el } */
+    slotSection: () => { const h = byText('h2', '選擇入場時段')[0]; return h ? h.closest('section') : null; },
+
+    /**
+     * { loading, error, status, slots, stamp }：slots 是 { id, text, status, remaining, el }；
+     * stamp 是第一列元素本身，重新讀取後會換成新的元素，用來分辨「已經是新的資料」。
+     */
     listState() {
-      const list = $('[data-testid=slot-list]');
-      if (!list) return { loading: true, error: '', slots: null };
-      const loading = list.getAttribute('aria-busy') === 'true';
-      const errText = POOL.visibleText('[data-testid=list-error]');
-      const rows = $$('[data-testid=slot]', list);
-      const slots = rows.length ? rows.map((r) => {
-        const day = r.closest('[data-testid=slot-day]');
-        const date = day ? norm(($('h3', day) || {}).textContent) : '';
-        const rem = r.dataset.remaining;
-        return { id: r.dataset.slotId, text: norm(`${date} ${($('th', r) || {}).textContent || ''}`), status: r.dataset.status || 'unknown', remaining: rem === '' || rem == null ? null : Number(rem), el: r };
+      const sec = POOL.slotSection();
+      if (!sec) return { loading: true, error: '', slots: null, stamp: null };
+      const alert = [...sec.querySelectorAll('[role="alert"]')].find((a) => !a.hidden && textOf(a));
+      const errText = alert ? textOf(alert) : '';
+      const loading = deepAll('[aria-busy="true"]', sec).length > 0 || byText('p', '載入中', sec).length > 0;
+      const rows = deepAll('tr', sec).filter((tr) => /\d{1,2}:\d{2}/.test(textOf(tr.querySelector('th'))) && tr.querySelector('a, button'));
+      const slots = rows.length ? rows.map((tr) => {
+        const day = tr.closest('section');
+        const date = day ? textOf(day.querySelector('h3')) : '';
+        const time = textOf(tr.querySelector('th'));
+        const cells = [...tr.querySelectorAll('td')].map(textOf);
+        const statusText = cells.find((c) => statusFromText(c) !== 'unknown') || '';
+        const link = tr.querySelector('a[href*="/select/"]');
+        const id = link ? decodeURIComponent(link.getAttribute('href').split('/').pop()) : `${date} ${time}`;
+        const m = statusText.match(/剩\s*(\d+)\s*張/);
+        return { id, text: norm(`${date} ${time}`), status: statusFromText(statusText), remaining: m ? Number(m[1]) : null, el: tr };
       }) : null;
-      return { loading, error: errText, status: errText ? POOL.parseError(errText).status : 0, slots };
+      return { loading, error: errText, status: errText ? POOL.parseError(errText).status : 0, slots, stamp: rows[0] || null };
     },
 
     refreshList() {
-      const b = $('[data-testid=refresh-status]');
+      const b = buttonByText('更新狀態');
       if (b) b.click();
       return !!b;
     },
 
     openSlot(slot) {
-      const a = slot.el && $('a[data-testid=slot-buy]', slot.el);
+      const a = slot.el && slot.el.querySelector('a[href*="/select/"]');
       if (!a) return false;
       a.click();
       return true;
     },
 
-    /** 票價表 → [{ name, price }] */
+    /** 票價表（標題是「票價」的表格）→ [{ name, price }] */
     prices() {
-      return $$('[data-testid=price-table] tr').map((tr) => ({
-        name: norm(($('th', tr) || {}).textContent),
-        price: Number((norm(($('td', tr) || {}).textContent).match(/\d[\d,]*/) || ['0'])[0].replace(/,/g, '')),
+      const table = deepAll('table').find((t) => textOf(t.querySelector('caption')) === '票價');
+      if (!table) return [];
+      return [...table.querySelectorAll('tr')].map((tr) => ({
+        name: textOf(tr.querySelector('th')),
+        price: Number((textOf(tr.querySelector('td')).match(/\d[\d,]*/) || ['0'])[0].replace(/,/g, '')),
       })).filter((p) => p.name);
     },
 
     /** 尚未開放時，頁面寫的開放說明 */
-    openingText: () => POOL.visibleText('[data-testid=opening]'),
+    openingText() {
+      const sec = POOL.slotSection();
+      const el = sec ? [...sec.querySelectorAll('[role="status"]')].find((x) => !x.hidden && /開放/.test(textOf(x))) : null;
+      return el ? textOf(el) : '';
+    },
 
     /* ── 選票頁 ── */
 
     selectInfo() {
-      const s = $('[data-testid=selected-slot]');
-      const st = $('[data-testid=slot-status]');
-      return { slotId: s ? s.dataset.slotId : null, text: s ? norm(s.textContent).replace(/^入場時段：/, '') : '', status: st ? st.dataset.status : 'unknown' };
+      const p = byText('p', /^入場時段：/)[0];
+      const text = p ? textOf(p).replace(/^入場時段：/, '') : '';
+      const slotId = decodeURIComponent(location.pathname.split('/').pop());
+      return { slotId, text, status: statusFromText(text) };
     },
 
-    /** [{ id, name, price, select }] */
+    /** 張數欄位：name 是 qty_<票種>；票種名稱看欄位的標籤，單價看同一列的 NT$ */
     ticketTypes() {
-      return $$('[data-testid=ticket-type]').map((r) => ({
-        id: r.dataset.typeId,
-        name: norm(($('label', r) || {}).textContent),
-        price: Number(r.dataset.price) || 0,
-        select: $('select[data-testid=ticket-qty]', r),
-      }));
+      return $$('select[name^="qty_"]').map((sel) => {
+        const label = sel.labels && sel.labels[0];
+        const row = sel.closest('tr');
+        const price = Number((textOf(row).match(/NT\$\s*([\d,]+)/) || [0, '0'])[1].replace(/,/g, ''));
+        return { id: sel.name.replace(/^qty_/, ''), name: textOf(label), price, select: sel };
+      });
     },
 
-    /** 每筆上限：張數選單最大的那一個 */
     maxPerOrder() {
-      const vals = $$('select[data-testid=ticket-qty] option').map((o) => Number(o.value)).filter(Number.isFinite);
+      const vals = $$('select[name^="qty_"] option').map((o) => Number(o.value)).filter(Number.isFinite);
       return vals.length ? Math.max(...vals) : Infinity;
     },
 
     setQty(typeId, n) {
-      const t = POOL.ticketTypes().find((x) => x.id === typeId);
-      return !!(t && t.select && setFieldValue(t.select, n));
+      const sel = $(`select[name="qty_${CSS.escape(typeId)}"]`);
+      return !!(sel && setFieldValue(sel, n));
     },
 
     qtyOf(typeId) {
-      const t = POOL.ticketTypes().find((x) => x.id === typeId);
-      return t && t.select ? Number(t.select.value) : NaN;
+      const sel = $(`select[name="qty_${CSS.escape(typeId)}"]`);
+      return sel ? Number(sel.value) : NaN;
     },
 
-    submitSelect() { const b = $('[data-testid=select-next]'); if (b) b.click(); return !!b; },
+    submitSelect() { const b = buttonByText('下一步'); if (b) b.click(); return !!b; },
 
-    formError: () => POOL.visibleText('[data-testid=form-error]'),
+    /** 表單層級的錯誤：「下一步」或「確認建立訂單」那一列正上方的訊息 */
+    formError() {
+      const b = buttonByText('下一步') || buttonByText('確認建立訂單');
+      return alertAbove(b);
+    },
 
     /* ── 填資料頁 ── */
 
-    PROFILE_FIELDS: ['name', 'phone', 'email', 'note'],
+    PROFILE_LABELS: { name: '姓名', phone: '手機', email: 'Email', note: '備註' },
 
-    profileInput(field) {
-      const form = $('[data-testid=info-form]');
-      return form ? form.elements[field] || null : null;
-    },
+    profileInput: (field) => fieldByLabel(POOL.PROFILE_LABELS[field]),
 
     /** 填你提供的資料，回傳 { filled, missing }；備註沒填就不動 */
     fillProfile(p) {
       const filled = [], missing = [];
-      for (const f of POOL.PROFILE_FIELDS) {
+      for (const f of Object.keys(POOL.PROFILE_LABELS)) {
         if (f === 'note' && !p.note) continue;
         const el = POOL.profileInput(f);
-        if (!el) { missing.push(f); continue; }
-        if (setFieldValue(el, p[f] || '')) filled.push(f); else missing.push(f);
+        if (!el) { missing.push(POOL.PROFILE_LABELS[f]); continue; }
+        if (setFieldValue(el, p[f] || '')) filled.push(f); else missing.push(POOL.PROFILE_LABELS[f]);
       }
       return { filled, missing };
     },
 
-    hasAgree: () => !!$('[data-testid=agree]'),
+    agreeBox: () => { const c = fieldByLabel(/同意/); return c && c.type === 'checkbox' ? c : null; },
+
+    hasAgree: () => !!POOL.agreeBox(),
 
     setAgree(on) {
-      const cb = $('[data-testid=agree]');
+      const cb = POOL.agreeBox();
       if (!cb) return false;
       if (cb.checked !== on) cb.click();
       return cb.checked === on;
@@ -461,37 +557,45 @@
     /** 網站逐欄顯示的錯誤 → { 欄位: 訊息 } */
     fieldErrors() {
       const out = {};
-      for (const el of $$('[data-error-for]')) if (!el.hidden && norm(el.textContent)) out[el.dataset.errorFor] = norm(el.textContent);
+      for (const f of Object.keys(POOL.PROFILE_LABELS)) {
+        const msg = alertNear(POOL.profileInput(f));
+        if (msg) out[f] = msg;
+      }
+      const agree = alertNear(POOL.agreeBox());
+      if (agree) out.agree = agree;
       return out;
     },
 
-    submitInfo() { const b = $('[data-testid=info-next]'); if (b) b.click(); return !!b; },
+    submitInfo() { const b = buttonByText('下一步'); if (b) b.click(); return !!b; },
 
     /* ── 確認頁：只讀，不按 ── */
 
-    confirmGates: () => ({ captcha: !!$('[data-testid=captcha]'), botcheck: !!$('[data-testid=botcheck]') }),
+    confirmGates: () => ({
+      captcha: !!fieldByLabel('驗證碼') || deepAll('canvas[aria-label*="驗證碼"], img[alt*="驗證碼"]').length > 0,
+      botcheck: !!buttonByText('我不是機器人'),
+    }),
 
     holdLeft() {
-      const el = $('[data-testid=hold-left]');
-      const n = el ? Number(norm(el.textContent)) : NaN;
-      return Number.isFinite(n) ? n : null;
+      const m = textOf($('main')).match(/剩餘\s*(\d+)\s*秒/);
+      return m ? Number(m[1]) : null;
     },
 
-    confirmButton: () => $('[data-testid=confirm-order]'),
+    confirmButton: () => buttonByText('確認建立訂單'),
 
-    summary: () => norm(($('[data-testid=order-summary]') || {}).textContent),
+    summary: () => textOf($('main')).slice(0, 300),
 
-    /* ── 完成頁、排隊頁、錯誤頁 ── */
+    /* ── 完成頁、錯誤頁 ── */
 
-    orderId: () => norm(($('[data-testid=order-id]') || {}).textContent),
+    orderId: () => (textOf($('main')).match(/訂單編號：\s*([A-Z0-9-]+)/) || [])[1] || '',
 
     errorPage() {
-      const c = $('[data-testid=error-code]');
-      return { status: c ? Number(c.dataset.status) || 0 : 0, code: c ? norm(c.textContent) : '', message: norm(($('[data-testid=error-message]') || {}).textContent) };
+      const alert = [...document.querySelectorAll('main [role="alert"]')].find((a) => textOf(a));
+      const t = textOf(alert);
+      return { status: Number((t.match(/（(\d{3})）/) || [])[1]) || 0, code: (t.match(/^([A-Z][A-Z_]+)/) || [])[1] || '', message: t.replace(/^[A-Z_]+（\d{3}）\s*/, '') };
     },
 
     /** 頁面重點（黑盒子用）：只取主要內容的文字 */
-    mainText: () => norm(($('main') || document.body || {}).innerText || '').slice(0, 800),
+    mainText: () => textOf($('main')).slice(0, 800),
   };
 
   /** 目前這一頁用哪一支轉接：DOM 準備好之後由 90-boot.js 決定，都不認得就是 null（什麼都不做） */
@@ -769,16 +873,26 @@
     return state.aborted || state.left ? null : r;
   }
 
-  /** 等時段列表讀完（成功或失敗）；逾時回傳 null */
-  async function waitList(maxMs) {
+  /**
+   * 等時段列表讀完（成功或失敗）；逾時回傳 null。
+   * prevStamp 是按「更新狀態」之前的第一列：舊的列還留在畫面上時不算讀完，要等換成新的（或出現錯誤）。
+   */
+  async function waitList(maxMs, prevStamp = null) {
     const t0 = Date.now();
     while (Date.now() - t0 < maxMs) {
-      if (state.aborted) return null;
+      if (state.aborted || state.left) return null;
       const s = SITE.listState();
-      if (!s.loading && (s.error || s.slots)) return s;
+      if (!s.loading && (s.error || (s.slots && s.stamp !== prevStamp))) return s;
       await sleep(100);
     }
     return null;
+  }
+
+  /** 按「更新狀態」，回傳按之前的第一列（給 waitList 分辨新舊） */
+  function refreshList() {
+    const before = SITE.listState().stamp;
+    SITE.refreshList();
+    return before;
   }
 
   /**
@@ -806,6 +920,13 @@
         const r = await grant('fail', what);
         if (!r) return finish(false, 'fail-limit', `${what}，重試次數用完了`, { handOff: true });
         continue;   // 前一次確定失敗了，才再送一次
+      }
+      if (action === 'reload') {
+        // 表單權杖過期之類：重新整理這一頁拿新的，這一步會重新做一次（有次數上限）
+        const r = await grant('fail', what);
+        if (!r) return finish(false, 'fail-limit', `${what}，重試次數用完了`, { handOff: true });
+        location.reload();
+        return;
       }
       if (action === 'duplicate') {
         // 網站說已經收到了：上一次其實送到了，不要再送，往下一步看看
@@ -840,9 +961,10 @@
   async function onList(d) {
     const cfg = d.cfg || {};
     const need = totalWanted(cfg);
+    let prev = null;
     for (;;) {
       if (state.aborted || state.left) return;
-      const ls = await waitList(30000);
+      const ls = await waitList(30000, prev);
       if (!ls) {
         const r = await grant('load', '時段列表等了 30 秒還沒出來');
         if (!r) return finish(false, 'list-timeout', '時段列表一直沒有出來，先停下來', { handOff: true });
@@ -852,7 +974,7 @@
       if (ls.error) {
         const r = await grant('load', `時段載入失敗：${ls.error.replace(/。請按.*$/, '')}`, ls.status);
         if (!r) return finish(false, 'load-limit', `${ls.error}。連續 5 分鐘都沒有恢復，先停下來`, { handOff: true });
-        SITE.refreshList();
+        prev = refreshList();
         await sleep(50);
         continue;
       }
@@ -867,7 +989,7 @@
       if (pick.kind === 'not-open') {
         const r = await grant('not-open', describePick(pick, need));
         if (!r) return finish(false, 'not-open-limit', `${describePick(pick, need)}，重試次數用完了`);
-        SITE.refreshList();
+        prev = refreshList();
         await sleep(50);
         continue;
       }
@@ -1067,9 +1189,9 @@
         const odd = ls.slots.filter((s) => !['available', 'limited', 'full', 'not-open'].includes(s.status));
         add('status', '時段狀態判讀', odd.length ? 'warn' : 'ok', odd.length ? `${odd.length} 個看不出狀態` : '都認得');
         const buy = ls.slots.find(isBuyable);
-        add('buy', '選購按鈕', !buy ? 'skip' : buy.el && buy.el.querySelector('a[data-testid=slot-buy]') ? 'ok' : 'fail', buy ? '' : '目前沒有能買的時段');
+        add('buy', '選購按鈕', !buy ? 'skip' : buy.el && buy.el.querySelector('a[href*="/select/"]') ? 'ok' : 'fail', buy ? '' : '目前沒有能買的時段');
       }
-      add('refresh', '更新狀態按鈕', $('[data-testid=refresh-status]') ? 'ok' : 'warn');
+      add('refresh', '更新狀態按鈕', buttonByText('更新狀態') ? 'ok' : 'warn');
       add('prices', '票價表', SITE.prices().length ? 'ok' : 'warn', SITE.prices().map((x) => x.name).join('、'));
     }
     const worst = items.some((i) => i.status === 'fail') ? 'fail' : items.some((i) => i.status === 'warn') ? 'warn' : 'ok';
