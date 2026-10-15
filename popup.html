@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+<head>
+<meta charset="utf-8">
+<title>一般票券訂票助手</title>
+<link rel="stylesheet" href="popup.css">
+</head>
+<body>
+<header>
+  <img src="icons/icon32.png" alt="" width="20" height="20">
+  <h1>一般票券訂票助手</h1>
+</header>
+<main>
+  <label class="field">網址
+    <input id="eventUrl" type="url" placeholder="http://127.0.0.1:3300/pool/" autocomplete="off" spellcheck="false">
+  </label>
+  <p class="hint" id="regUrl"></p>
+
+  <label class="field">時段關鍵字
+    <textarea id="keywords" rows="3" placeholder="11/20 06:00" spellcheck="false"></textarea>
+  </label>
+  <p class="hint">一行一組，越上面越優先。同一行用空格隔開，每一段都要出現在時段文字裡，例如「11/20 08:00」。只寫一個時間代表開始時間。</p>
+
+  <label class="field">票種與張數
+    <textarea id="tickets" rows="3" placeholder="全票 2&#10;兒童票 1" spellcheck="false"></textarea>
+  </label>
+  <p class="hint">一行一筆：票種名稱加張數，例如「全票 2」。名稱照網站上的寫法。</p>
+
+  <fieldset class="profile">
+    <legend>購票人資料</legend>
+    <div class="row">
+      <label class="field">姓名<input id="profileName" type="text" autocomplete="name" spellcheck="false"></label>
+      <label class="field">手機<input id="profilePhone" type="tel" autocomplete="tel" placeholder="09xxxxxxxx"></label>
+    </div>
+    <label class="field">Email<input id="profileEmail" type="email" autocomplete="email" spellcheck="false"></label>
+    <label class="field">備註（選填）<input id="profileNote" type="text" spellcheck="false"></label>
+    <label class="check"><input id="autoAgree" type="checkbox" checked> 自動勾選網站的「同意使用須知」</label>
+    <p class="hint">只存在這台電腦的擴充功能裡，匯出紀錄時會隱藏。開始前會先檢查有沒有填完整、格式對不對。</p>
+  </fieldset>
+
+  <div class="checkrow">
+    <button id="btnCheck" class="small" type="button">檢查時段</button>
+    <span class="hint">會在背景開一個分頁讀時段狀態與票價，讀完自動關掉，不會選購</span>
+  </div>
+  <p id="checkMsg" class="hint" role="status"></p>
+  <div class="checkrow">
+    <button id="btnHealth" class="small" type="button">健檢</button>
+    <span class="hint">檢查網站的頁面還是不是助手認得的樣子，不會選購</span>
+  </div>
+  <p id="healthMsg" class="hint" role="status"></p>
+  <ul id="healthList" class="health"></ul>
+
+  <label class="field">開賣時間
+    <input id="openTime" type="datetime-local" step="1">
+  </label>
+
+  <details>
+    <summary>進階設定</summary>
+    <div class="row">
+      <label class="field">提前開頁（秒）
+        <input id="preOpenSec" type="number" min="5" max="600" value="90">
+      </label>
+      <label class="check"><input id="syncClock" type="checkbox" checked> 與網站的伺服器對時</label>
+    </div>
+    <div class="row">
+      <label class="field">還沒開放時每幾毫秒重看
+        <input id="notOpenRetryMs" type="number" min="700" step="100" value="1000">
+      </label>
+      <label class="field">最多重看幾次
+        <input id="notOpenMaxRetries" type="number" min="0" max="120" value="30">
+      </label>
+    </div>
+    <div class="row">
+      <label class="field">送出失敗後重送幾次
+        <input id="failMaxRetries" type="number" min="0" max="10" value="3">
+      </label>
+    </div>
+    <label class="check"><input id="fallback" type="checkbox"> 關鍵字都對不到、或對到的都買不到時，改選第一個能買的時段</label>
+  </details>
+
+  <div class="buttons">
+    <button id="btnSchedule" class="primary" type="button">排程</button>
+    <button id="btnRunNow" type="button">立即執行</button>
+    <button id="btnResume" type="button" hidden title="遇到排隊、驗證碼或資料有問題時助手會停下來；你處理好之後按這裡，讓它從目前這一頁接著做">繼續</button>
+    <button id="btnCancel" class="danger" type="button">取消任務</button>
+  </div>
+  <p id="msg" class="msg" role="status"></p>
+
+  <section>
+    <h2>目前任務</h2>
+    <div id="taskBox" class="task">沒有任務</div>
+  </section>
+
+  <section>
+    <h2>紀錄 <button id="btnExport" class="link" type="button">匯出</button><button id="btnClearLogs" class="link" type="button">清除</button></h2>
+    <ol id="logList" class="logs"></ol>
+  </section>
+
+  <p class="foot">助手會停在確認頁，訂單由你自己確認建立；排隊、驗證碼、機器人檢查一律交給你。目前只支援本機的一般票券模擬站，接真實網站前要先確認法律適用與網站條款。</p>
+</main>
+<script src="popup.js"></script>
+</body>
+</html>

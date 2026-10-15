@@ -1,0 +1,7 @@
+# 預先帶入的設定只放在各台的安裝資料夾（可能含購票人資料）
+preset.json
+# 打包產物與金鑰
+*.crx
+*.pem
+node_modules/
+__pycache__/
