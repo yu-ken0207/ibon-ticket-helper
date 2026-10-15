@@ -669,6 +669,54 @@ const SCENARIOS = [
       ];
     },
   },
+  {
+    name: 'run-gating',
+    once: true,
+    title: '選購按鈕能不能按，跟背景程式接不接受一致；停用時在按鈕下方寫原因；檢查做完不會把停用的按鈕又打開',
+    async run({ ctx, popup }) {
+      const RUN = ['#btnSchedule', '#btnRunNow', '#btnCheck', '#btnHealth'];
+      const offCount = async () => { let n = 0; for (const id of RUN) if (await popup.isDisabled(id)) n++; return n; };
+      const note = () => popup.evaluate(() => { const n = document.getElementById('runNote'); return n.hidden ? '' : n.textContent; });
+      // 直接問背景程式：這個網址的「立即執行」接不接受（不經過按鈕）
+      const ask = (url) => popup.evaluate((u) => new Promise((r) => chrome.runtime.sendMessage(
+        { type: 'run-now', cfg: { eventUrl: u, keywords: '11/20 06:00', tickets: '全票 1', profile: { name: '測試使用者', phone: '0912345678', email: 'tester@example.com', note: '' }, autoAgree: true } }, r)), url);
+      const setUrl = async (url, runnable) => {
+        await popup.fill('#eventUrl', url);
+        await popup.waitForFunction(([want, u]) => document.getElementById('eventUrl').value.trim() === u
+          && document.getElementById('btnRunNow').disabled === !want
+          && (want ? document.getElementById('runNote').hidden : !document.getElementById('runNote').hidden), [runnable, url], { timeout: 5000 }).catch(() => {});
+      };
+      const out = {};
+      for (const [k, url, runnable] of [['ibon', IBON_URL, false], ['other', 'https://example.com/tickets', false], ['empty', '', false], ['pool', `${BASE}/pool/`, true]]) {
+        await setUrl(url, runnable);
+        out[k] = { off: await offCount(), note: await note(), info: await popup.isVisible('#btnInfo') };
+      }
+      const ibRun = await ask(IBON_URL);
+      const otherRun = await ask('https://example.com/tickets');
+
+      // 檢查時段做到一半把網址換成 ibon：檢查做完，按鈕要維持停用（以前會被改回可按）
+      await scenario(ctx, 'slow', 'delayMs=3000');
+      await setUrl(`${BASE}/pool/`, true);
+      await popup.click('#btnCheck');
+      await setUrl(IBON_URL, false);
+      await popup.waitForFunction(() => !/檢查中/.test(document.getElementById('checkMsg').textContent), null, { timeout: 30000 });
+      const afterCheck = { off: await offCount(), note: await note(), msg: await popup.textContent('#checkMsg') };
+
+      const ver = await popup.textContent('#ver');
+      const manifestVer = await popup.evaluate(() => chrome.runtime.getManifest().version);
+      const s = await status(popup);
+      return [
+        ['ibon 活動頁：四個選購按鈕停用，「讀取活動資訊」可用', out.ibon.off === 4 && out.ibon.info, `停用 ${out.ibon.off}、讀取活動資訊${out.ibon.info ? '有' : '沒有'}`],
+        ['ibon 活動頁：按鈕下方寫原因，跟背景程式拒絕的理由一字不差', !!out.ibon.note && !ibRun.ok && out.ibon.note === ibRun.error, out.ibon.note],
+        ['不支援的網址：停用，原因跟背景程式一致', out.other.off === 4 && !out.other.info && !otherRun.ok && out.other.note === otherRun.error, out.other.note],
+        ['網址空白：停用並請你先貼網址', out.empty.off === 4 && /請先在上面貼網址/.test(out.empty.note), out.empty.note],
+        ['模擬站網址：四個都能按，沒有停用說明', out.pool.off === 0 && out.pool.note === '' && !out.pool.info, `停用 ${out.pool.off}`],
+        ['檢查途中換成 ibon：檢查做完按鈕仍停用', afterCheck.off === 4 && !!afterCheck.note, `停用 ${afterCheck.off}｜${afterCheck.msg}`],
+        ['設定頁標題顯示目前載入的版本', ver === `v${manifestVer}`, `${ver}（manifest ${manifestVer}）`],
+        ['沒有建立任務', s.task.phase === 'none', `任務 ${s.task.phase}`],
+      ];
+    },
+  },
 ];
 
 /* ───────────── 執行 ───────────── */

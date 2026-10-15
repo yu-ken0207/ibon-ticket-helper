@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "一般票券訂票助手",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "一般票券的購票輔助：照你的偏好選時段與張數、填你提供的購票人資料，停在確認頁由你自己確認。遇到排隊、驗證碼、機器人檢查一律停下來交給你。選購只支援本機的一般票券模擬站；ibon 活動頁只讀取場次、票價、開賣時間，不選票、不送出。",
   "minimum_chrome_version": "111",
   "permissions": ["storage", "alarms", "notifications", "tabs", "webRequest"],

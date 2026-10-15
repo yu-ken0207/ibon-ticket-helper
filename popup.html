@@ -8,7 +8,7 @@
 <body>
 <header>
   <img src="icons/icon32.png" alt="" width="20" height="20">
-  <h1>一般票券訂票助手</h1>
+  <h1>一般票券訂票助手 <span id="ver" class="ver"></span></h1>
 </header>
 <main>
   <label class="field">網址
@@ -93,6 +93,7 @@
     <button id="btnResume" type="button" hidden title="遇到排隊、驗證碼或資料有問題時助手會停下來；你處理好之後按這裡，讓它從目前這一頁接著做">繼續</button>
     <button id="btnCancel" class="danger" type="button">取消任務</button>
   </div>
+  <p id="runNote" class="hint warnmsg" role="note" hidden></p>
   <p id="msg" class="msg" role="status"></p>
 
   <section>

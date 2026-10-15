@@ -128,3 +128,4 @@ fieldset.profile legend { font-weight: 700; padding: 0 4px; }
 .infoview .raw { color: var(--muted); font-size: 11px; }
 .infoview .warn { color: var(--warn); }
 button:disabled { opacity: .5; cursor: not-allowed; }
+header .ver { font-size: 12px; font-weight: 400; color: var(--muted); }

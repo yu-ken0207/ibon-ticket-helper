@@ -97,8 +97,10 @@ function normalizeCfg(raw) {
 }
 
 const URL_HINT = '網址看不懂。目前只支援本機的一般票券模擬站，請貼 http://127.0.0.1:3300/pool/';
-const INFO_ONLY_HINT = 'ibon 活動頁目前只能「讀取活動資訊」。自動選票、送出還在確認網站規則與法律適用，不會執行';
+const INFO_ONLY_HINT = 'ibon 活動頁目前只能「讀取活動資訊」：排程、立即執行、檢查時段、健檢只支援本機的一般票券模擬站；在真實網站自動選票、送出還在確認網站規則與法律適用，所以停用';
 const urlHint = (url) => (infoSiteOf(url) ? INFO_ONLY_HINT : URL_HINT);
+/** 選購（排程、立即執行、繼續、檢查時段、健檢）接不接受這個網址：validate() 和設定頁的按鈕都用這一個判斷 */
+const runCheck = (url) => (targetUrlOf(url) ? { runnable: true, runNote: '' } : { runnable: false, runNote: urlHint(url) });
 
 /** 開始前把設定檢查完整，不把不完整的資料送到網站 */
 function validate(cfg) {
@@ -724,7 +726,8 @@ async function handle(msg, sender) {
     case 'preview-url': {
       const site = siteOf(msg.url);
       const info = infoSiteOf(msg.url);
-      return { ok: true, regUrl: targetUrlOf(msg.url), site, label: site ? siteLabel(site) : null, info, infoUrl: infoUrlOf(msg.url), infoLabel: info ? INFO_SITES[info].label : null };
+      // runnable／runNote：設定頁照這個決定選購按鈕能不能按、旁邊寫什麼原因（跟 validate() 同一個判斷，不會一邊能按一邊拒絕）
+      return { ok: true, regUrl: targetUrlOf(msg.url), site, label: site ? siteLabel(site) : null, info, infoUrl: infoUrlOf(msg.url), infoLabel: info ? INFO_SITES[info].label : null, ...runCheck(msg.url) };
     }
     case 'status': {
       const { task = null, logs = [] } = await get(['task', 'logs']);

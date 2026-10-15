@@ -85,24 +85,39 @@ function saveSoon() {
   saveTimer = setTimeout(() => chrome.storage.local.set({ form: readForm() }), 200);
 }
 
-// 選購用的按鈕：ibon 活動頁只能讀取資訊，這些一律停用
+/*
+ * 選購用的按鈕（排程、立即執行、檢查時段、健檢）能不能按，照背景程式對這個網址的判斷（preview-url 的 runnable／runNote），
+ * 跟背景程式真正接不接受任務是同一個判斷。不能按時，原因寫在按鈕下方，不只是變灰。
+ * 其他欄位（時段、票種、購票人資料）不在這裡擋：按下去由背景程式檢查，並說明缺什麼。
+ */
 const RUN_BUTTONS = ['btnSchedule', 'btnRunNow', 'btnCheck', 'btnHealth'];
-const INFO_ONLY_TITLE = 'ibon 活動頁目前只能讀取活動資訊；自動選票、送出還在確認網站規則與法律適用';
+let runState = { runnable: false, note: '' };   // 最近一次網址判斷的結果
 
-function setInfoOnly(on) {
-  $('infoBox').hidden = !on;
+function applyRunState() {
   for (const id of RUN_BUTTONS) {
-    $(id).disabled = on;
-    if (on) $(id).title = INFO_ONLY_TITLE; else $(id).removeAttribute('title');
+    $(id).disabled = !runState.runnable;
+    if (!runState.runnable && runState.note) $(id).title = runState.note; else $(id).removeAttribute('title');
   }
+  const note = $('runNote');
+  note.textContent = runState.runnable ? '' : runState.note;
+  note.hidden = runState.runnable || !runState.note;
 }
 
 async function previewUrl() {
   const url = $('eventUrl').value.trim();
   const hint = $('regUrl');
-  if (!url) { hint.textContent = ''; hint.className = 'hint'; setInfoOnly(false); return; }
+  if (!url) {
+    hint.textContent = ''; hint.className = 'hint';
+    $('infoBox').hidden = true;
+    runState = { runnable: false, note: '請先在上面貼網址' };
+    applyRunState();
+    return;
+  }
   const r = await send({ type: 'preview-url', url });
-  setInfoOnly(!!(r.ok && r.info));
+  if ($('eventUrl').value.trim() !== url) return;   // 等回覆的時候網址又改了：這個結果已經過時，以後面那次為準
+  runState = r.ok ? { runnable: !!r.runnable, note: r.runNote || '' } : { runnable: false, note: r.error || '背景程式沒有回應，請重新開啟這個視窗' };
+  applyRunState();
+  $('infoBox').hidden = !(r.ok && r.info);
   if (r.ok && r.regUrl) { hint.textContent = `${r.label}，時段列表：${r.regUrl}`; hint.className = 'hint'; }
   else if (r.ok && r.info) {
     hint.textContent = `${r.infoLabel}的活動頁：只能讀取活動資訊。自動選票、送出還在確認中，不會執行`;
@@ -277,7 +292,7 @@ $('btnCheck').addEventListener('click', async () => {
   const r = await send({ type: 'check-slots', cfg: readForm() });
   out.textContent = r.msg || r.error || '檢查失敗';
   out.className = 'hint ' + (r.ok ? 'good' : 'bad');
-  btn.disabled = false;
+  applyRunState();   // 照目前網址決定能不能再按（檢查途中網址可能換了）
   refresh();
 });
 
@@ -298,7 +313,7 @@ $('btnHealth').addEventListener('click', async () => {
     li.append(el('span', {}, HEALTH_MARK[i.status] || '?'), el('span', {}, i.label), el('span', {}, i.detail || ''));
     return li;
   }));
-  btn.disabled = false;
+  applyRunState();
   refresh();
 });
 
@@ -347,6 +362,8 @@ async function loadPreset() {
 }
 
 (async () => {
+  $('ver').textContent = `v${chrome.runtime.getManifest().version}`;   // 確認載入的是哪一版
+  applyRunState();   // 網址判斷回來之前先停用
   let { form } = await chrome.storage.local.get('form');
   if (!form) {
     form = await loadPreset();
