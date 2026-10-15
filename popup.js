@@ -85,14 +85,97 @@ function saveSoon() {
   saveTimer = setTimeout(() => chrome.storage.local.set({ form: readForm() }), 200);
 }
 
+// 選購用的按鈕：ibon 活動頁只能讀取資訊，這些一律停用
+const RUN_BUTTONS = ['btnSchedule', 'btnRunNow', 'btnCheck', 'btnHealth'];
+const INFO_ONLY_TITLE = 'ibon 活動頁目前只能讀取活動資訊；自動選票、送出還在確認網站規則與法律適用';
+
+function setInfoOnly(on) {
+  $('infoBox').hidden = !on;
+  for (const id of RUN_BUTTONS) {
+    $(id).disabled = on;
+    if (on) $(id).title = INFO_ONLY_TITLE; else $(id).removeAttribute('title');
+  }
+}
+
 async function previewUrl() {
   const url = $('eventUrl').value.trim();
   const hint = $('regUrl');
-  if (!url) { hint.textContent = ''; hint.className = 'hint'; return; }
+  if (!url) { hint.textContent = ''; hint.className = 'hint'; setInfoOnly(false); return; }
   const r = await send({ type: 'preview-url', url });
+  setInfoOnly(!!(r.ok && r.info));
   if (r.ok && r.regUrl) { hint.textContent = `${r.label}，時段列表：${r.regUrl}`; hint.className = 'hint'; }
-  else { hint.textContent = '看不懂這個網址。目前只支援本機的一般票券模擬站（http://127.0.0.1:3300/pool/）'; hint.className = 'hint bad'; }
+  else if (r.ok && r.info) {
+    hint.textContent = `${r.infoLabel}的活動頁：只能讀取活動資訊。自動選票、送出還在確認中，不會執行`;
+    hint.className = 'hint';
+    const { eventInfo } = await chrome.storage.local.get('eventInfo');
+    renderInfo(eventInfo && eventInfo.url === r.infoUrl ? eventInfo : null);
+  } else { hint.textContent = '看不懂這個網址。選購只支援本機的一般票券模擬站（http://127.0.0.1:3300/pool/）；ibon 活動頁可以讀取活動資訊'; hint.className = 'hint bad'; }
 }
+
+/* ───────────── 活動資訊（只讀） ───────────── */
+
+const STATUS_CLASS = { 'on-sale': 'st-on-sale', 'sold-out': 'st-sold-out', 'not-open': 'st-not-open', closed: 'st-closed', unknown: 'st-unknown' };
+const dtText = (iso) => (iso ? iso.replace('T', ' ').replace(/-/g, '/') : '');
+
+function renderInfo(info) {
+  const v = $('infoView');
+  v.replaceChildren();
+  if (!info) return;
+  v.append(el('div', { class: 'title' }, info.title || '（沒有讀到標題）'));
+  for (const o of info.offers || []) v.append(el('div', { class: 'hint' }, `${o.label}：${o.value}`));
+
+  v.append(el('h3', {}, `場次（${(info.sessions || []).length}）`));
+  if ((info.sessions || []).length) {
+    const table = el('table');
+    const head = el('tr');
+    for (const h of ['演出時間', '場次', '場地', '狀態']) head.append(el('th', {}, h));
+    table.append(head);
+    for (const s of info.sessions) {
+      const tr = el('tr');
+      const extra = s.saleEnd ? `（${dtText(s.saleEnd)} 截止）` : s.saleStart ? `（${dtText(s.saleStart)} 開賣）` : '';
+      tr.append(el('td', {}, s.date ? `${dtText(s.date)} ${s.time || ''}`.trim() : s.when), el('td', {}, s.name), el('td', {}, s.venue),
+        el('td', { class: STATUS_CLASS[s.status] || '' }, s.statusLabel + extra));
+      table.append(tr);
+    }
+    v.append(table);
+  } else v.append(el('div', { class: 'hint' }, '沒有讀到場次'));
+
+  v.append(el('h3', {}, '票區與票價（節目介紹的文字）'));
+  if ((info.prices || []).length) {
+    const ul = el('ul');
+    for (const p of info.prices) ul.append(el('li', {}, `${p.name || '（沒寫名稱）'}　NT$${p.price.toLocaleString('en-US')}`));
+    v.append(ul);
+  } else v.append(el('div', { class: 'hint' }, '節目介紹裡沒有認得的票價'));
+  for (const line of info.priceLines || []) v.append(el('div', { class: 'raw' }, `原文：${line}`));
+
+  v.append(el('h3', {}, '開賣時間'));
+  if ((info.saleTimes || []).length) {
+    for (const t of info.saleTimes) v.append(el('div', {}, dtText(t.at)), el('div', { class: 'raw' }, `原文：${t.text}`));
+  } else v.append(el('div', { class: 'hint' }, '節目介紹裡沒有認得的開賣時間'));
+
+  if ((info.limits || []).length) {
+    v.append(el('h3', {}, '限購（購票須知原文）'));
+    const ul = el('ul');
+    for (const l of info.limits) ul.append(el('li', {}, l));
+    v.append(ul);
+  }
+  for (const w of info.warnings || []) v.append(el('div', { class: 'warn' }, `注意：${w}`));
+  v.append(el('div', { class: 'raw' }, `讀取時間 ${fmt(info.readAt)}。票區與票價取自節目介紹的文字；實際能買的票區要進購票流程才看得到，助手不會進去。`));
+}
+
+$('btnInfo').addEventListener('click', async () => {
+  const out = $('infoMsg');
+  const btn = $('btnInfo');
+  btn.disabled = true;
+  out.textContent = '讀取中…（只讀，不會點任何按鈕）';
+  out.className = 'hint';
+  const r = await send({ type: 'read-info', url: $('eventUrl').value.trim() });
+  out.textContent = r.ok ? '已讀取' : (r.error || '讀取失敗');
+  out.className = 'hint ' + (r.ok ? 'good' : 'bad');
+  renderInfo(r.ok ? r.info : null);
+  btn.disabled = false;
+  refresh();
+});
 
 /* ───────────── 狀態 ───────────── */
 

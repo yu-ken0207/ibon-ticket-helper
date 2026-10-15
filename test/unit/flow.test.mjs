@@ -89,6 +89,10 @@ test('網站錯誤的處理方式', () => {
   assert.equal(classifyError('NOT_ON_SALE'), 'wait');
   assert.equal(classifyError('HOLD_EXPIRED'), 'restart');
   assert.equal(classifyError('TOKEN_EXPIRED'), 'reload');
+  assert.equal(classifyError('RATE_LIMITED'), 'rate-limit');
+  assert.equal(classifyError('', 429), 'rate-limit');
+  assert.equal(classifyError('TRANSIENT', 429), 'rate-limit');
+  assert.equal(classifyError('', 500), 'retry');
   assert.equal(classifyError('QUEUE_REQUIRED'), 'gate');
   assert.equal(classifyError('CAPTCHA_WRONG'), 'gate');
   assert.equal(classifyError('BOTCHECK_REQUIRED'), 'gate');

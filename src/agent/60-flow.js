@@ -6,7 +6,12 @@
    *   confirm  一定停在這裡：標出「確認建立訂單」，請你自己檢查後按；之後提醒保留時間
    *   queue    網站要排隊：停下來交給你，不略過排隊
    *   error    網站錯誤頁：暫時性錯誤就重新整理（有次數上限），其他交給你
+   * 網站說請求太多（429）：讀取照網站給的 Retry-After 等（背景程式看得到標頭；沒給就逐步拉長），有次數上限；送出不自動重送，交給你。
+   * 是不是 429 不只看頁面上的字：很多網站只寫「系統忙碌」，所以出錯時也問背景程式剛剛的回應狀態（rateSeenSince）。
    * 判斷寫在 lib/flow.js；頁面怎麼讀寫寫在網站轉接（10-pool.js）。 */
+
+  /** 時段列表的錯誤訊息：網站自己已經寫了「時段載入失敗」就不再加，也去掉叫人按按鈕的那一句 */
+  const listErrText = (t) => { const x = t.replace(/。請按.*$/, ''); return /^時段載入失敗/.test(x) ? x : `時段載入失敗：${x}`; };
 
   const totalWanted = (cfg) => (cfg.tickets || []).reduce((a, t) => a + (Number.isInteger(t.qty) && t.qty > 0 ? t.qty : 0), 0) || 1;
 
@@ -28,6 +33,36 @@
     log(`${msg}，再試一次（${of}）`, 'warn');
     await sleep(r.delayMs);
     return state.aborted || state.left ? null : r;
+  }
+
+  /** 背景程式有沒有看到這個分頁在 since（毫秒時間戳）之後被回 429 */
+  async function rateSeenSince(since) {
+    const r = await call('rate-seen', { since }, 2000);
+    return !!(r && r.seen);
+  }
+
+  /** 這一頁開始載入的時間（頁面自己載入時發的請求都在這之後） */
+  const pageStart = () => Math.floor(performance.timeOrigin || 0);
+
+  /**
+   * 網站說請求太多（429）時的讀取重試：向背景程式要額度，照它給的時間等（Retry-After 或逐步拉長）。
+   * 可以再讀回傳 true；額度用完或網站要等太久就停下來交給你，回傳 false。
+   */
+  async function rateWait(msg) {
+    const r = await call('retry', { reason: 'rate', msg, status: 429 }, 3000);
+    if (!r || !r.allow) {
+      const why = r && r.reason === 'too-long'
+        ? `網站要求等 ${Math.round(r.retryAfterMs / 1000)} 秒，超過助手自動等候的上限`
+        : `已經照網站的要求等候、重試 ${r ? r.count : 0} 次，還是一直說請求太多`;
+      await finish(false, 'rate-limit', `${msg}。${why}，先停下來交給你`, { handOff: true });
+      return false;
+    }
+    const sec = (r.delayMs / 1000).toFixed(1);
+    const how = r.source === 'retry-after' ? `照網站要求等 ${sec} 秒` : `網站沒說要等多久，先等 ${sec} 秒`;
+    setStatus(`${msg}，${how}再試（${r.count}/${r.max}）`, 'warn');
+    log(`${msg}，${how}再試一次（${r.count}/${r.max}）`, 'warn');
+    await sleep(r.delayMs);
+    return !(state.aborted || state.left);
   }
 
   /**
@@ -59,6 +94,7 @@
   async function submitOnce(stepName, d, slotId) {
     for (;;) {
       if (state.aborted || state.left) return;
+      const sentAt = Date.now();
       const clicked = stepName === 'select' ? SITE.submitSelect() : SITE.submitInfo();
       if (!clicked) return finish(false, 'no-button', '找不到送出按鈕，先停下來', { handOff: true });
       setStatus('已送出，等網站回應…', 'ok');
@@ -66,12 +102,18 @@
       if (out.kind === 'left') return;
       if (out.kind === 'timeout') return finish(false, 'timeout', '送出後 60 秒都沒有回應，先停下來。請看頁面上的狀況，不要急著再按', { handOff: true });
       const what = `網站回覆「${out.text}」`;
-      const action = classifyError(out.code, out.status);
+      let action = classifyError(out.code, out.status);
+      // 頁面沒寫 429，但回應其實是 429：一樣當成請求太多（不自動重送）
+      if (['retry', 'reload', 'wait', 'restart', 'stop'].includes(action) && await rateSeenSince(sentAt)) action = 'rate-limit';
       if (action === 'next-slot') {
         if (slotId) await call('skip-slot', { slotId }, 1500);
         log(`${what}，改選下一個時段`, 'warn');
         location.assign(SITE.listUrl());
         return;
+      }
+      if (action === 'rate-limit') {
+        // 送出被說請求太多：不自動重送，什麼時候再送由你決定
+        return finish(false, 'rate-limited', `${what}。網站說請求太多，助手不自動重送，先停下來交給你：請等一下再自己按，或到擴充功能按「繼續」`, { handOff: true });
       }
       if (action === 'retry') {
         const r = await grant('fail', what);
@@ -119,6 +161,8 @@
     const cfg = d.cfg || {};
     const need = totalWanted(cfg);
     let prev = null;
+    let since = pageStart();   // 這一輪讀取是從什麼時候開始的（給 rateSeenSince）
+    const refresh = () => { since = Date.now(); return refreshList(); };
     for (;;) {
       if (state.aborted || state.left) return;
       const ls = await waitList(30000, prev);
@@ -129,9 +173,15 @@
         return;
       }
       if (ls.error) {
-        const r = await grant('load', `時段載入失敗：${ls.error.replace(/。請按.*$/, '')}`, ls.status);
+        if (classifyError('', ls.status) === 'rate-limit' || await rateSeenSince(since)) {
+          if (!(await rateWait(listErrText(ls.error)))) return;
+          prev = refresh();
+          await sleep(50);
+          continue;
+        }
+        const r = await grant('load', listErrText(ls.error), ls.status);
         if (!r) return finish(false, 'load-limit', `${ls.error}。連續 5 分鐘都沒有恢復，先停下來`, { handOff: true });
-        prev = refreshList();
+        prev = refresh();
         await sleep(50);
         continue;
       }
@@ -146,7 +196,7 @@
       if (pick.kind === 'not-open') {
         const r = await grant('not-open', describePick(pick, need));
         if (!r) return finish(false, 'not-open-limit', `${describePick(pick, need)}，重試次數用完了`);
-        prev = refreshList();
+        prev = refresh();
         await sleep(50);
         continue;
       }
@@ -226,7 +276,13 @@
   async function onErrorPage() {
     const e = SITE.errorPage();
     const what = `網站回了錯誤頁（${e.status} ${e.code}）：${e.message}`;
-    const action = classifyError(e.code, e.status);
+    let action = classifyError(e.code, e.status);
+    if (action !== 'rate-limit' && action !== 'gate' && await rateSeenSince(pageStart())) action = 'rate-limit';
+    if (action === 'rate-limit') {
+      if (!(await rateWait(what))) return;
+      location.reload();
+      return;
+    }
     if (action === 'retry') {
       const r = await grant('load', what, e.status);
       if (!r) return finish(false, 'load-limit', `${what}，一直沒有恢復，先停下來`, { handOff: true });
@@ -317,7 +373,7 @@
     if (SITE.pageKind() !== 'list') return report({ ok: false, error: '打開的不是時段列表，請確認網址' });
     const ls = await waitList(20000);
     if (!ls) return report({ ok: false, error: '20 秒內沒有讀到時段列表' });
-    if (ls.error) return report({ ok: false, error: `時段載入失敗：${ls.error}` });
+    if (ls.error) return report({ ok: false, error: listErrText(ls.error) });
     const p = previewSlot(ls.slots, cfg.keywords);
     const buyable = ls.slots.filter(isBuyable).length;
     const full = ls.slots.filter((s) => s.status === 'full').length;

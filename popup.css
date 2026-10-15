@@ -114,3 +114,17 @@ h2 { display: flex; align-items: center; gap: 4px; margin: 0 0 4px; font-size: 1
 [hidden] { display: none !important; }
 fieldset.profile { border: 1px solid var(--line); border-radius: 8px; margin: 8px 0; padding: 4px 10px 6px; }
 fieldset.profile legend { font-weight: 700; padding: 0 4px; }
+
+/* 活動資訊（只讀） */
+.infobox { margin: 6px 0 8px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--field); }
+.infoview h3 { margin: 6px 0 2px; font-size: 13px; }
+.infoview .title { font-weight: 700; font-size: 14px; margin: 4px 0; }
+.infoview table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.infoview th, .infoview td { padding: 3px 4px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+.infoview .st-on-sale { color: var(--ok); font-weight: 600; }
+.infoview .st-sold-out, .infoview .st-closed { color: var(--err); }
+.infoview .st-not-open, .infoview .st-unknown { color: var(--warn); }
+.infoview ul { margin: 2px 0; padding-left: 18px; }
+.infoview .raw { color: var(--muted); font-size: 11px; }
+.infoview .warn { color: var(--warn); }
+button:disabled { opacity: .5; cursor: not-allowed; }

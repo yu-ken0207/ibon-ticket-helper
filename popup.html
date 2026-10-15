@@ -16,6 +16,15 @@
   </label>
   <p class="hint" id="regUrl"></p>
 
+  <section id="infoBox" class="infobox" hidden>
+    <div class="checkrow">
+      <button id="btnInfo" class="small" type="button">讀取活動資訊</button>
+      <span class="hint">只讀活動頁上的場次、票價、開賣時間，不會選票、送出或購買</span>
+    </div>
+    <p id="infoMsg" class="hint" role="status"></p>
+    <div id="infoView" class="infoview"></div>
+  </section>
+
   <label class="field">時段關鍵字
     <textarea id="keywords" rows="3" placeholder="11/20 06:00" spellcheck="false"></textarea>
   </label>
@@ -96,7 +105,7 @@
     <ol id="logList" class="logs"></ol>
   </section>
 
-  <p class="foot">助手會停在確認頁，訂單由你自己確認建立；排隊、驗證碼、機器人檢查一律交給你。目前只支援本機的一般票券模擬站，接真實網站前要先確認法律適用與網站條款。</p>
+  <p class="foot">助手會停在確認頁，訂單由你自己確認建立；排隊、驗證碼、機器人檢查一律交給你。選購只支援本機的一般票券模擬站；ibon 活動頁只能讀取活動資訊。接真實網站的選購之前，要先確認法律適用與網站條款。</p>
 </main>
 <script src="popup.js"></script>
 </body>

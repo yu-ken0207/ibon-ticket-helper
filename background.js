@@ -15,17 +15,19 @@
  *   done         結束（你確認後建立了訂單，或失敗）
  *   cancelled    已取消
  *
- * 網站（lib/sites.js）：目前只有本機的一般票券模擬站。助手一定停在確認頁，不會替你建立訂單；
+ * 網站（lib/sites.js）：選購只支援本機的一般票券模擬站。助手一定停在確認頁，不會替你建立訂單；
+ * ibon 活動頁只能「讀取活動資訊」（ibon-info.js 讀、這裡存），排程、立即執行、檢查時段一律不接受 ibon 的網址。
  * 排隊、驗證碼、機器人檢查一律交給你，處理完你按「繼續」它才接著做。
  */
 'use strict';
 
 import { fmt, int } from './lib/format.js';
-import { loadDelay, loadGaveUp } from './lib/backoff.js';
+import { loadDelay, loadGaveUp, parseRetryAfter, rateLimitDelay, RATE_MAX_RETRIES } from './lib/backoff.js';
 import { summarizeHealth } from './lib/health.js';
 import { sanitizeBox, BLACKBOX_MAX } from './lib/box.js';
-import { siteOf, targetUrlOf, siteKey, siteLabel, pageKindOf } from './lib/sites.js';
+import { siteOf, targetUrlOf, siteKey, siteLabel, pageKindOf, infoSiteOf, infoUrlOf, INFO_SITES } from './lib/sites.js';
 import { parseTicketLines, cleanProfile, checkProfile, describeProfileProblem } from './lib/flow.js';
+import { sanitizeInfo } from './lib/eventinfo.js';
 
 const ALARM_OPEN = 'ith-open';
 const ALARM_WATCH = 'ith-watch';
@@ -95,10 +97,12 @@ function normalizeCfg(raw) {
 }
 
 const URL_HINT = '網址看不懂。目前只支援本機的一般票券模擬站，請貼 http://127.0.0.1:3300/pool/';
+const INFO_ONLY_HINT = 'ibon 活動頁目前只能「讀取活動資訊」。自動選票、送出還在確認網站規則與法律適用，不會執行';
+const urlHint = (url) => (infoSiteOf(url) ? INFO_ONLY_HINT : URL_HINT);
 
 /** 開始前把設定檢查完整，不把不完整的資料送到網站 */
 function validate(cfg) {
-  if (!cfg.regUrl) return URL_HINT;
+  if (!cfg.regUrl) return urlHint(cfg.eventUrl);
   if (!cfg.keywords.length && !cfg.fallback) return '請至少填一組時段關鍵字（或打開「關鍵字都對不到時改選第一個能買的」）';
   if (!cfg.tickets.length) return '請填要買的票種與張數，一行一筆，例如「全票 2」';
   const bad = cfg.tickets.find((t) => !Number.isInteger(t.qty));
@@ -144,7 +148,7 @@ function newTask(cfg, mode, extra) {
     mode, cfg, regUrl: cfg.regUrl, site: cfg.site, slug: siteKey(cfg.site, cfg.regUrl), skip: [],
     targetTs: null, openAt: null, tabId: null, windowId: null,
     phase: mode === 'scheduled' ? 'armed' : 'running',
-    notOpen: 0, fail: 0, loadFail: 0, loadStreak: 0, loadFailSince: null, createdAt: Date.now(), startedAt: null, firedAt: null, fireDrift: null,
+    notOpen: 0, fail: 0, loadFail: 0, loadStreak: 0, loadFailSince: null, rateRetries: 0, createdAt: Date.now(), startedAt: null, firedAt: null, fireDrift: null,
     result: null, warned: {},
     ...extra,
   };
@@ -289,7 +293,7 @@ const pendingChecks = new Map();
 
 async function openCheck(kind, raw) {
   const cfg = normalizeCfg(raw);
-  if (!cfg.regUrl) return { ok: false, error: URL_HINT };
+  if (!cfg.regUrl) return { ok: false, error: urlHint(cfg.eventUrl) };
   const tab = await chrome.tabs.create({ url: cfg.regUrl, active: false });
   addLog(kind === 'health' ? '健檢：在背景分頁檢查時段列表頁' : '檢查時段：在背景分頁讀取時段與票價');
   return new Promise((resolve) => {
@@ -307,6 +311,51 @@ function finishCheck(tabId, result) {
   const out = { ...result, at: Date.now() };
   addLog(`${pending.kind === 'health' ? '健檢' : '檢查時段'}：${out.msg || out.error || ''}`, out.ok ? 'ok' : 'warn');
   pending.resolve(out);
+  return true;
+}
+
+/* ───────────────────────── 讀取活動資訊（A 類，只讀） ─────────────────────────
+ * 你自己已經開著同一個活動頁，就直接在那個分頁讀；沒有的話在背景開一個分頁讀，讀完自動關掉。
+ * 讀的是頁面上看得到的資訊（ibon-info.js），不點按鈕、不送出、不進購票流程。結果存在 storage 的 eventInfo 給設定頁顯示。 */
+
+// 背景分頁編號 → { url, resolve, timer }
+const pendingInfo = new Map();
+
+async function readInfo(rawUrl) {
+  const url = infoUrlOf(rawUrl);
+  if (!url) return { ok: false, error: '這不是能讀取的活動頁。目前只支援 ibon 的活動頁：https://ticket.ibon.com.tw/ActivityInfo/Details/數字' };
+  const open = (await chrome.tabs.query({})).find((t) => t.url && infoUrlOf(t.url) === url && !pendingInfo.has(t.id));
+  if (open) {
+    const r = await chrome.tabs.sendMessage(open.id, { type: 'info-read' }).catch(() => null);
+    if (r && r.ok) return saveInfo(url, r.info, '你開著的分頁');
+  }
+  const tab = await chrome.tabs.create({ url, active: false });
+  addLog('讀取活動資訊：在背景分頁讀活動頁（只讀，不點任何按鈕），讀完自動關掉');
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => finishInfo(tab.id, { ok: false, error: '40 秒內沒有讀到活動頁，請自己打開看看' }), 40000);
+    pendingInfo.set(tab.id, { url, resolve, timer });
+  });
+}
+
+async function saveInfo(url, info, from) {
+  const clean = { ...sanitizeInfo(info), url, site: infoSiteOf(url) };
+  await set({ eventInfo: clean });
+  const n = (clean.sessions || []).length;
+  addLog(`讀取活動資訊（${from}）：「${clean.title || '沒有標題'}」，場次 ${n} 個、票價 ${(clean.prices || []).length} 筆、開賣時間 ${(clean.saleTimes || []).length} 筆`, n ? 'ok' : 'warn');
+  return { ok: true, info: clean };
+}
+
+function finishInfo(tabId, result) {
+  const pending = pendingInfo.get(tabId);
+  if (!pending) return false;
+  pendingInfo.delete(tabId);
+  clearTimeout(pending.timer);
+  chrome.tabs.remove(tabId).catch(() => {});
+  if (result && result.ok && result.info) saveInfo(pending.url, result.info, '背景分頁').then(pending.resolve, () => pending.resolve({ ok: false, error: '存不了讀到的資訊' }));
+  else {
+    addLog(`讀取活動資訊：${(result && result.error) || '沒有讀到'}`, 'warn');
+    pending.resolve({ ok: false, error: (result && result.error) || '沒有讀到活動資訊' });
+  }
   return true;
 }
 
@@ -368,6 +417,39 @@ function onFired(tabId, p) {
   });
 }
 
+/*
+ * 網站回「請求太多」（429）時記下 Retry-After。頁面程式讀不到回應標頭，背景程式用 webRequest 看得到；
+ * 只看、不改也不擋任何請求，範圍只有 manifest 的 host_permissions（本機模擬站）。
+ */
+const RATE_SEEN_MS = 15000;
+const rateSeen = new Map();   // tabId → { at, url, retryAfterMs }
+if (chrome.webRequest && chrome.webRequest.onCompleted) {
+  chrome.webRequest.onCompleted.addListener((d) => {
+    if (d.statusCode !== 429 || d.tabId < 0) return;
+    const h = (d.responseHeaders || []).find((x) => x.name.toLowerCase() === 'retry-after');
+    rateSeen.set(d.tabId, { at: Date.now(), url: d.url, retryAfterMs: h ? parseRetryAfter(h.value) : null });
+  }, { urls: ['http://127.0.0.1/pool/*', 'http://localhost/pool/*'], types: ['main_frame', 'xmlhttprequest'] }, ['responseHeaders']);
+}
+
+/** 這個分頁在 since 之後有沒有被回 429，而且是最近 RATE_SEEN_MS 內的事 */
+function freshRate(tabId, since = 0) {
+  const s = rateSeen.get(tabId);
+  return s && s.at >= since && Date.now() - s.at <= RATE_SEEN_MS ? s : null;
+}
+
+/** 請求太多後要不要再讀一次、等多久：照 Retry-After，沒給就逐步拉長；有次數上限，網站要等太久就交給你 */
+async function rateRetryGrant(t, tabId) {
+  const fresh = () => freshRate(tabId);
+  let seen = fresh();
+  if (!seen) { await new Promise((r) => setTimeout(r, 300)); seen = fresh(); }   // 頁面可能比 webRequest 早一步看到錯誤
+  const attempt = t.rateRetries || 0;
+  const d = rateLimitDelay(attempt, seen ? seen.retryAfterMs : null);
+  if (!d.allow) return { allow: false, reason: d.reason, count: attempt, max: RATE_MAX_RETRIES, retryAfterMs: d.retryAfterMs ?? null };
+  rateSeen.delete(tabId);
+  await set({ task: { ...t, rateRetries: attempt + 1 } });
+  return { allow: true, count: attempt + 1, max: RATE_MAX_RETRIES, delayMs: d.delayMs, source: d.source };
+}
+
 /* 讀取失敗後的重試：連續失敗才逐步拉長間隔，最長 3 秒一次；連續失敗超過 5 分鐘就交給你。 */
 
 /** 給不給重試、等多久。只能在 serial 裡呼叫（裡面直接寫 storage） */
@@ -387,6 +469,7 @@ function onRetry(tabId, p) {
     const t = await getTask();
     if (!t || t.tabId !== tabId || !['fired', 'running'].includes(t.phase)) return { allow: false };
     if (p && p.reason === 'load') return loadRetryGrant(t, Number(p.status) || 0);
+    if (p && p.reason === 'rate') return rateRetryGrant(t, tabId);
     const notOpen = p && p.reason === 'not-open';
     const used = notOpen ? t.notOpen : t.fail;
     const max = notOpen ? t.cfg.notOpenMaxRetries : t.cfg.failMaxRetries;
@@ -501,8 +584,10 @@ chrome.tabs.onUpdated.addListener((tabId, info) => {
 
 /* ───────────────────────── 訊息入口 ───────────────────────── */
 
-const POPUP_TYPES = new Set(['schedule', 'run-now', 'resume', 'cancel', 'status', 'clear-logs', 'preview-url', 'check-slots', 'health-check']);
-const PAGE_TYPES = new Set(['hello', 'fired', 'fired-drift', 'retry', 'result', 'log', 'warn', 'abort-request', 'check-result', 'load-ok', 'clock', 'health-result', 'blackbox', 'skip-slot']);
+const POPUP_TYPES = new Set(['schedule', 'run-now', 'resume', 'cancel', 'status', 'clear-logs', 'preview-url', 'check-slots', 'health-check', 'read-info']);
+// 只讀活動資訊的頁面（ibon 活動頁）只能送這兩種
+const INFO_PAGE_TYPES = new Set(['info-hello', 'info-result']);
+const PAGE_TYPES = new Set(['hello', 'fired', 'fired-drift', 'retry', 'result', 'log', 'warn', 'abort-request', 'check-result', 'load-ok', 'clock', 'health-result', 'blackbox', 'skip-slot', 'rate-seen']);
 
 async function handle(msg, sender) {
   const type = msg && msg.type;
@@ -510,6 +595,14 @@ async function handle(msg, sender) {
   const extOrigin = `chrome-extension://${chrome.runtime.id}/`;
   const isExtensionPage = !!(sender && sender.id === chrome.runtime.id && typeof sender.url === 'string' && sender.url.startsWith(extOrigin));
   const fromTab = !isExtensionPage && !!(sender && sender.tab);
+
+  if (fromTab && infoSiteOf(sender.url || sender.tab.url)) {
+    // ibon 活動頁：只收讀取活動資訊的訊息，碰不到任何選購任務
+    if (!INFO_PAGE_TYPES.has(type)) return { ok: false, error: 'not allowed' };
+    const tabId = sender.tab.id;
+    if (type === 'info-hello') return { read: pendingInfo.has(tabId) };
+    return { ok: finishInfo(tabId, msg.payload || {}) };
+  }
 
   if (fromTab) {
     // 只接受頁面該送的訊息
@@ -571,9 +664,17 @@ async function handle(msg, sender) {
         // 讀取成功：連續失敗的計算重來
         await serial(async () => {
           const t = await getTask();
-          if (t && t.tabId === tabId && (t.loadStreak || t.loadFailSince)) await set({ task: { ...t, loadStreak: 0, loadFailSince: null } });
+          if (t && t.tabId === tabId && (t.loadStreak || t.loadFailSince || t.rateRetries)) await set({ task: { ...t, loadStreak: 0, loadFailSince: null, rateRetries: 0 } });
         });
         return { ok: true };
+      }
+      case 'rate-seen': {
+        // 頁面看到錯誤時問：剛剛的回應是不是 429？網站的錯誤訊息不一定寫狀態碼，回應標頭才準。
+        // 頁面可能比 webRequest 早一步看到錯誤，第一次沒看到就再等一下
+        const since = Number(p.since) || 0;
+        let seen = freshRate(tabId, since);
+        if (!seen) { await new Promise((r) => setTimeout(r, 300)); seen = freshRate(tabId, since); }
+        return { seen: !!seen };
       }
       case 'check-result': return { ok: finishCheck(tabId, p) };
       case 'health-result': {
@@ -617,11 +718,13 @@ async function handle(msg, sender) {
     case 'resume': return resume(msg.cfg);
     case 'check-slots': return openCheck('check', msg.cfg);
     case 'health-check': return openCheck('health', msg.cfg);
+    case 'read-info': return readInfo(msg.url);
     case 'cancel': return cancel();
     case 'clear-logs': await serial(() => set({ logs: [], blackbox: [] })); return { ok: true };
     case 'preview-url': {
       const site = siteOf(msg.url);
-      return { ok: true, regUrl: targetUrlOf(msg.url), site, label: site ? siteLabel(site) : null };
+      const info = infoSiteOf(msg.url);
+      return { ok: true, regUrl: targetUrlOf(msg.url), site, label: site ? siteLabel(site) : null, info, infoUrl: infoUrlOf(msg.url), infoLabel: info ? INFO_SITES[info].label : null };
     }
     case 'status': {
       const { task = null, logs = [] } = await get(['task', 'logs']);
@@ -651,6 +754,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 
 chrome.tabs.onRemoved.addListener(async (tabId) => {
   if (pendingChecks.has(tabId)) { finishCheck(tabId, { ok: false, error: '檢查用的分頁被關掉了' }); return; }
+  if (pendingInfo.has(tabId)) { finishInfo(tabId, { ok: false, error: '讀取用的分頁被關掉了' }); return; }
   const task = await getTask();
   if (task && task.tabId === tabId && ACTIVE_PHASES.includes(task.phase)) {
     await cancel('網站的分頁被關掉了，任務已取消');

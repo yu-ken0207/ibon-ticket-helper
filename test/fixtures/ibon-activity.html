@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+<head>
+<meta charset="utf-8">
+<title>[測試用] 活動頁結構樣本</title>
+</head>
+<body>
+<!--
+  端對端測試用的樣本頁：只模擬活動頁「讀資訊會用到的結構」（標題、售票平台清單、封閉 Shadow DOM 裡的場次表、說明區塊），
+  內容全部是虛構的，不是任何官方網站，也不會被部署。測試時由 Playwright 攔截網址直接回這一頁，不連到真的網站。
+  按鈕被點到就打一個 /__clicked 請求，測試用來確認助手沒有點任何東西。
+  注意：「線上購票」「已售完」和「…截止」是真站看過的寫法；「尚未開賣」按鈕和「…開賣」小字是推測的寫法，真站還沒看過。
+-->
+<p style="background:#fde68a;padding:6px">測試用頁面：只模擬活動頁的結構，內容是虛構的，不是任何官方網站。</p>
+<h1>（測試）示範游泳池夜間入場券</h1>
+<div class="offer"><ul><li>售票平台： 示範機台、線上購票</li><li>票券型態： 電子票</li></ul></div>
+<div id="divGameInfo"><app-game></app-game></div>
+<div id="detail">
+  <div class="card">
+    <div class="card-header" data-toggle="collapse">節目介紹</div>
+    <div class="collapse show"><div class="card-body">
+      <p>（測試）示範游泳池夜間入場券</p>
+      <p>活動日期：2026 年 12 月 05 日 (六) 18:00</p>
+      <p>票價資訊 Ticket Price：全票 $300 | 優待票 $200 | 2樓看台 $150</p>
+      <p>售票時間 On Sale Time：2026 年 11 月 20 日 (五) 中午 12:00</p>
+    </div></div>
+  </div>
+  <div class="card">
+    <div class="card-header collapsed" data-toggle="collapse">周邊商品預購公告</div>
+    <div class="collapse" style="display:none"><div class="card-body"><p>商品：每筆訂單總限購 2 件</p></div></div>
+  </div>
+  <div class="card">
+    <div class="card-header collapsed" data-toggle="collapse">購票須知</div>
+    <div class="collapse" style="display:none"><div class="card-body">
+      <p>每位會員限購4張。</p>
+      <p>退票手續費為票價 10%，最低 $50。</p>
+      <ul><li>取票方式：請至示範機台取票</li></ul>
+    </div></div>
+  </div>
+</div>
+<script>
+  // 場次表放在封閉的 Shadow DOM，晚 1 秒才出現
+  const host = document.querySelector('app-game');
+  const root = host.attachShadow({ mode: 'closed' });
+  setTimeout(() => {
+    root.innerHTML = `
+      <div class="grid-wrap"><div class="row"><div class="col-12 grid"><div class="head-dark">
+        <p>演出 / 銷售日期</p><p>場次名稱</p><p>場地 / 地區</p><p></p>
+      </div></div></div>
+      <div id="GameInfoList" class="row">
+        <div class="col-12 grid"><div class="d-flex tr"><p class="date">2026/12/05(六) 18:00 </p><p>夜間入場（第一梯）</p><p class="map">示範游泳池</p><p><button class="btn-buy">線上購票</button><small>2026/12/04 12:00截止</small></p></div></div>
+        <div class="col-12 grid"><div class="d-flex tr"><p class="date">2026/12/05(六) 20:00 </p><p>夜間入場（第二梯）</p><p class="map">示範游泳池</p><p><button class="btn-buy" disabled>已售完</button></p></div></div>
+        <div class="col-12 grid"><div class="d-flex tr"><p class="date">2026/12/06(日) 18:00 </p><p>夜間入場（第三梯）</p><p class="map">示範游泳池</p><p><button class="btn-buy" disabled>尚未開賣</button><small>2026/11/25 12:00 開賣</small></p></div></div>
+      </div></div>`;
+    for (const b of root.querySelectorAll('button')) b.addEventListener('click', () => { fetch('/__clicked', { method: 'POST' }); });
+  }, 1000);
+</script>
+</body>
+</html>

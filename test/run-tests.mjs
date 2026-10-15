@@ -7,10 +7,11 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import https from 'node:https';
+import { spawn, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
-import { build } from '../tools/build.mjs';
+import { stale } from '../tools/build.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const EXT = path.resolve(HERE, '..');
@@ -36,6 +37,11 @@ function localDT(ts) {
 }
 const nextWholeSecond = (msAhead) => Math.ceil((Date.now() + msAhead) / 1000) * 1000;
 
+// ibon 活動頁的測試樣本（虛構內容，只模擬結構）。測試瀏覽器用 --host-resolver-rules 把 *.ibon.com.tw 指到本機的 HTTPS 伺服器，
+// 連網路層都到不了真的網站（擴充功能自己開的分頁也一樣）
+const IBON_FIXTURE = fs.readFileSync(path.join(HERE, 'fixtures', 'ibon-activity.html'), 'utf8');
+const IBON_URL = 'https://ticket.ibon.com.tw/ActivityInfo/Details/990001';
+
 const PROFILE = { name: '測試使用者', phone: '0912-345-678', email: 'tester@example.com', note: '' };
 
 /* ───────────── 模擬站 ───────────── */
@@ -59,13 +65,36 @@ async function siteState(ctx) {
   return (await fetch(`${BASE}/pool/api/_test/state`, { headers: { cookie, accept: 'application/json' } })).json();
 }
 
+/* ───────────── ibon 活動頁樣本（本機 HTTPS） ───────────── */
+
+const IBON_PORT = PORT + 1000;
+const ibonRequests = [];   // 樣本伺服器收到的每個請求「方法 路徑」
+
+function startIbonFixture() {
+  execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes',
+    '-keyout', path.join(WORK, 'ibon-key.pem'), '-out', path.join(WORK, 'ibon-cert.pem'), '-days', '2',
+    '-subj', '/CN=ticket.ibon.com.tw', '-addext', 'subjectAltName=DNS:ticket.ibon.com.tw,DNS:*.ibon.com.tw'], { stdio: 'ignore' });
+  const server = https.createServer({ key: fs.readFileSync(path.join(WORK, 'ibon-key.pem')), cert: fs.readFileSync(path.join(WORK, 'ibon-cert.pem')) }, (req, res) => {
+    ibonRequests.push(`${req.method} ${req.url}`);
+    if (req.method === 'GET' && req.url === new URL(IBON_URL).pathname) {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+      return res.end(IBON_FIXTURE);
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  return new Promise((resolve) => server.listen(IBON_PORT, '127.0.0.1', () => resolve(server)));
+}
+
 /* ───────────── 瀏覽器與設定頁 ───────────── */
 
 async function launch() {
   const dir = fs.mkdtempSync(path.join(WORK, 'profile-'));
   const ctx = await chromium.launchPersistentContext(dir, {
-    channel: 'chromium', headless: !HEADED, viewport: { width: 1200, height: 900 },
-    args: [`--disable-extensions-except=${EXT}`, `--load-extension=${EXT}`],
+    channel: 'chromium', headless: !HEADED, viewport: { width: 1200, height: 900 }, ignoreHTTPSErrors: true,
+    args: [`--disable-extensions-except=${EXT}`, `--load-extension=${EXT}`,
+      // ibon 的網域一律指到本機樣本伺服器；不用 proxy，免得系統 proxy 繞過這條規則
+      `--host-resolver-rules=MAP ibon.com.tw 127.0.0.1:${IBON_PORT},MAP *.ibon.com.tw 127.0.0.1:${IBON_PORT}`, '--no-proxy-server', '--ignore-certificate-errors'],
   });
   const sw = ctx.serviceWorkers()[0] || await ctx.waitForEvent('serviceworker', { timeout: 15000 });
   const extId = new URL(sw.url()).host;
@@ -122,6 +151,8 @@ async function waitTask(popup, pred, timeoutMs) {
 const ready = (t) => t.phase === 'waiting-user' && t.result && t.result.kind === 'ready';
 const stopped = (t) => ['done', 'waiting-user', 'cancelled'].includes(t.phase);
 const sitePage = (ctx) => ctx.pages().find((p) => p.url().startsWith(`${BASE}/pool/`)) || null;
+/** 伺服器記下的請求時間 → 相鄰兩次的間隔（毫秒） */
+const gapsOf = (ts) => (ts || []).slice(1).map((t, i) => t - ts[i]);
 const resultMsg = (s) => (s.task.result ? `${s.task.result.kind}：${s.task.result.msg}` : `phase=${s.task.phase}`);
 
 /** 每個情境都要成立：沒有重複送出、沒有替使用者按確認 */
@@ -304,6 +335,101 @@ const SCENARIOS = [
     },
   },
   {
+    name: 'rate-limit-list',
+    title: '讀取太頻繁（429）：照網站給的 Retry-After 等了才重新讀，恢復後照常選購',
+    async run({ ctx, popup }) {
+      await scenario(ctx, 'rate-limit-list');
+      await fillPopup(popup);
+      await clickAndRead(popup, '#btnRunNow');
+      const s = await waitTask(popup, ready, 40000);
+      const st = await siteState(ctx);
+      const gaps = gapsOf(st.stats.slotsAt);
+      const logs = (s.logs || []).map((l) => l.msg);
+      return [
+        ['停在確認頁等使用者', ready(s.task), resultMsg(s)],
+        ['被擋兩次、第三次才讀到', st.stats.rateLimited === 2 && st.stats.slotsRequests === 3, `429 共 ${st.stats.rateLimited} 次、讀取 ${st.stats.slotsRequests} 次`],
+        ['沒有在網站要求的時間之前再要', st.stats.rateLimitEarly === 0, `太早重試 ${st.stats.rateLimitEarly} 次`],
+        ['每次都至少等 2 秒（Retry-After: 2）', gaps.length === 2 && gaps.every((g) => g >= 2000), `間隔 ${gaps.join('、')} ms`],
+        ['紀錄寫明照網站要求等', logs.some((m) => /照網站要求等 2\.\d 秒/.test(m)), logs.find((m) => /請求太多/.test(m)) || ''],
+        ...noDuplicates(st),
+      ];
+    },
+  },
+  {
+    name: 'rate-limit-noheader',
+    title: '一直說請求太多、也沒給 Retry-After：間隔逐步拉長（2、4、8 秒），重試 3 次就停下來交給使用者',
+    async run({ ctx, popup }) {
+      await scenario(ctx, 'rate-limit-list', 'retryAfter=0&errors=20');
+      await fillPopup(popup);
+      await clickAndRead(popup, '#btnRunNow');
+      const s = await waitTask(popup, stopped, 45000);
+      const st = await siteState(ctx);
+      const gaps = gapsOf(st.stats.slotsAt);
+      return [
+        ['停下來交給使用者', s.task.phase === 'waiting-user' && s.task.result.kind === 'rate-limit', resultMsg(s)],
+        ['訊息說明一直被說請求太多', /一直說請求太多/.test(s.task.result.msg), ''],
+        ['重試 3 次就停', st.stats.slotsRequests === 4, `讀取 ${st.stats.slotsRequests} 次`],
+        ['間隔逐步拉長', gaps.length === 3 && gaps[0] >= 1900 && gaps[1] >= 3900 && gaps[2] >= 7900, `間隔 ${gaps.join('、')} ms`],
+        ['沒有送出選購', st.stats.holdRequests === 0, `選購請求 ${st.stats.holdRequests}`],
+        ...noDuplicates(st),
+      ];
+    },
+  },
+  {
+    name: 'rate-limit-submit',
+    title: '送出時網站說請求太多（429）：不自動重送，停下來交給使用者',
+    async run({ ctx, popup }) {
+      await scenario(ctx, 'rate-limit-submit');
+      await fillPopup(popup);
+      await clickAndRead(popup, '#btnRunNow');
+      const s = await waitTask(popup, stopped, 40000);
+      await sleep(3000);   // 過了 Retry-After 也不會自己再送
+      const st = await siteState(ctx);
+      return [
+        ['停下來交給使用者', s.task.phase === 'waiting-user' && s.task.result.kind === 'rate-limited', resultMsg(s)],
+        ['訊息說不自動重送', /不自動重送/.test(s.task.result.msg), ''],
+        ['選購只送出一次', st.stats.holdRequests === 1, `選購請求 ${st.stats.holdRequests}`],
+        ['顯示「繼續」按鈕', await popup.isVisible('#btnResume'), ''],
+        ...noDuplicates(st),
+      ];
+    },
+  },
+  {
+    name: 'rate-limit-hidden',
+    title: '讀取時 429，但頁面只寫「請求太多」、不寫狀態碼：一樣照 Retry-After 等（看回應標頭，不靠頁面文字）',
+    async run({ ctx, popup }) {
+      await scenario(ctx, 'rate-limit-list', 'hideStatus=1');
+      await fillPopup(popup);
+      await clickAndRead(popup, '#btnRunNow');
+      const s = await waitTask(popup, stopped, 60000);
+      const st = await siteState(ctx);
+      const gaps = gapsOf(st.stats.slotsAt);
+      return [
+        ['停在確認頁等使用者', ready(s.task), resultMsg(s)],
+        ['沒有在網站要求的時間之前再要', st.stats.rateLimitEarly === 0, `太早重試 ${st.stats.rateLimitEarly} 次、讀取 ${st.stats.slotsRequests} 次`],
+        ['每次都至少等 2 秒（Retry-After: 2）', gaps.length === 2 && gaps.every((g) => g >= 2000), `間隔 ${gaps.join('、')} ms`],
+        ...noDuplicates(st),
+      ];
+    },
+  },
+  {
+    name: 'rate-limit-submit-hidden',
+    title: '送出時 429，但頁面不寫狀態碼：一樣認得是請求太多，不自動重送',
+    async run({ ctx, popup }) {
+      await scenario(ctx, 'rate-limit-submit', 'hideStatus=1');
+      await fillPopup(popup);
+      await clickAndRead(popup, '#btnRunNow');
+      const s = await waitTask(popup, stopped, 40000);
+      await sleep(3000);   // 過了 Retry-After 也不會自己再送
+      const st = await siteState(ctx);
+      return [
+        ['停下來，而且認得是請求太多', s.task.phase === 'waiting-user' && s.task.result.kind === 'rate-limited', resultMsg(s)],
+        ['選購只送出一次', st.stats.holdRequests === 1, `選購請求 ${st.stats.holdRequests}`],
+        ...noDuplicates(st),
+      ];
+    },
+  },
+  {
     name: 'slow',
     title: '回應很慢（每個 API 慢 3 秒）：耐心等，不會因為等太久又按一次',
     async run({ ctx, popup }) {
@@ -477,20 +603,89 @@ const SCENARIOS = [
       ];
     },
   },
+  {
+    name: 'ibon-info',
+    once: true,   // 跟模擬站的一般／困難模式無關，只跑一次
+    title: 'ibon 活動頁只讀資訊：顯示場次、票區、票價、開賣時間；不點任何按鈕、不送出，選購的按鈕停用',
+    async run({ ctx, popup }) {
+      ibonRequests.length = 0;
+      const requests = ibonRequests;
+      await popup.fill('#eventUrl', IBON_URL);
+      await sleep(600);
+      const hint = await popup.textContent('#regUrl');
+      const runOff = [];
+      for (const id of ['#btnSchedule', '#btnRunNow', '#btnCheck', '#btnHealth']) if (await popup.isDisabled(id)) runOff.push(id);
+      const pagesBefore = ctx.pages().length;
+
+      // 1. 沒有開著的活動頁：背景開一個分頁讀，讀完關掉
+      await popup.click('#btnInfo');
+      await popup.waitForFunction(() => document.querySelector('#infoMsg').textContent !== '' && !/讀取中/.test(document.querySelector('#infoMsg').textContent), null, { timeout: 40000 });
+      const msg = await popup.textContent('#infoMsg');
+      const view = await popup.textContent('#infoView');
+      const info = (await popup.evaluate(() => chrome.storage.local.get('eventInfo'))).eventInfo || {};
+      await sleep(500);
+      const pagesAfter = ctx.pages().length;
+      const bgLoads = requests.filter((r) => r === 'GET /ActivityInfo/Details/990001').length;   // 擴充功能自己開的背景分頁，也要是本機樣本回的
+      const ss = info.sessions || [];
+
+      // 2. 你自己開著同一頁：直接在那一頁讀，不另外開分頁
+      const mine = await ctx.newPage();
+      await mine.goto(IBON_URL);
+      await sleep(1500);
+      const loadsBefore = requests.filter((r) => r === 'GET /ActivityInfo/Details/990001').length;
+      await popup.bringToFront();
+      await popup.click('#btnInfo');
+      await popup.waitForFunction(() => /已讀取|失敗/.test(document.querySelector('#infoMsg').textContent), null, { timeout: 40000 });
+      const loadsAfter = requests.filter((r) => r === 'GET /ActivityInfo/Details/990001').length;
+      const mineOpen = !mine.isClosed();
+
+      // 3. 直接叫背景程式立即執行、檢查時段：ibon 網址一律拒絕
+      const cfg = { eventUrl: IBON_URL, keywords: '12/05 18:00', tickets: '全票 1', profile: PROFILE, autoAgree: true };
+      const ask = (type) => popup.evaluate(([t, c]) => new Promise((r) => chrome.runtime.sendMessage({ type: t, cfg: c }, r)), [type, cfg]);
+      const run = await ask('run-now');
+      const check = await ask('check-slots');
+      const s = await status(popup);
+
+      const clicked = requests.filter((r) => /__clicked/.test(r));
+      const nonGet = requests.filter((r) => !r.startsWith('GET '));
+      return [
+        ['網址提示說只能讀取活動資訊', /只能讀取活動資訊/.test(hint), hint],
+        ['排程、立即執行、檢查時段、健檢都停用', runOff.length === 4, runOff.join('、')],
+        ['讀取成功', /已讀取/.test(msg), msg],
+        ['標題與售票平台（說明區塊裡的「取票方式」不算）', info.title === '（測試）示範游泳池夜間入場券' && JSON.stringify((info.offers || []).map((o) => o.label)) === '["售票平台","票券型態"]', `${info.title}｜${JSON.stringify(info.offers)}`],
+        ['三個場次：時間、名稱、場地', ss.length === 3 && ss[0].date === '2026-12-05' && ss[0].time === '18:00' && ss[2].name === '夜間入場（第三梯）' && ss.every((x) => x.venue === '示範游泳池'), ss.map((x) => `${x.date} ${x.time} ${x.name} ${x.venue}`).join('／')],
+        ['場次狀態：販售中、已售完、尚未開賣（「尚未開賣」是推測的寫法，真站沒看過）', ss.map((x) => x.status).join(',') === 'on-sale,sold-out,not-open', ss.map((x) => x.status).join(',')],
+        ['場次的截止與開賣時間', ss[0] && ss[0].saleEnd === '2026-12-04T12:00' && ss[2] && ss[2].saleStart === '2026-11-25T12:00', `${ss[0] && ss[0].saleEnd}｜${ss[2] && ss[2].saleStart}`],
+        ['票區與票價（退票規則的 $50 不算）', JSON.stringify(info.prices) === JSON.stringify([{ name: '全票', price: 300 }, { name: '優待票', price: 200 }, { name: '2樓看台', price: 150 }]), JSON.stringify(info.prices)],
+        ['開賣時間', (info.saleTimes || []).length === 1 && info.saleTimes[0].at === '2026-11-20T12:00', JSON.stringify(info.saleTimes)],
+        ['限購規定只從購票須知讀（收合的也讀得到；周邊商品的不算）', JSON.stringify(info.limits) === '["每位會員限購4張。"]', JSON.stringify(info.limits)],
+        ['設定頁顯示讀到的資訊', /夜間入場（第一梯）/.test(view) && /NT\$300/.test(view) && /2026\/11\/20 12:00/.test(view), view.slice(0, 80)],
+        ['背景分頁也是本機樣本伺服器回的（沒有連到真站）', bgLoads === 1 && /示範游泳池/.test(info.title || ''), `本機收到 ${bgLoads} 次`],
+        ['讀完關掉背景分頁', pagesAfter === pagesBefore, `${pagesBefore} → ${pagesAfter}`],
+        ['開著的活動頁直接讀，不另外載入', loadsAfter === loadsBefore && mineOpen, `載入 ${loadsBefore} → ${loadsAfter}、你的分頁${mineOpen ? '還在' : '被關了'}`],
+        ['沒有點任何按鈕、沒有送出任何東西', clicked.length === 0 && nonGet.length === 0, `點擊 ${clicked.length}、非 GET 請求 ${nonGet.length}`],
+        ['立即執行、檢查時段都拒絕 ibon 網址', !run.ok && /只能「讀取活動資訊」/.test(run.error || '') && !check.ok && /只能「讀取活動資訊」/.test(check.error || ''), `${run.error}｜${check.error}`],
+        ['沒有建立任務', s.task.phase === 'none', `任務 ${s.task.phase}`],
+      ];
+    },
+  },
 ];
 
 /* ───────────── 執行 ───────────── */
 
 async function main() {
-  if (fs.readFileSync(path.join(EXT, 'agent.js'), 'utf8') !== build()) {
-    console.error('agent.js 不是最新的，請先執行 node tools/build.mjs');
+  const old = stale();
+  if (old.length) {
+    console.error(`${old.join('、')} 不是最新的，請先執行 node tools/build.mjs`);
     process.exit(2);
   }
   const sim = await startSim();
+  const ibon = await startIbonFixture();
   const results = [];
   try {
     for (const mode of MODES) for (const sc of SCENARIOS) {
       if (ONLY && !ONLY.has(sc.name)) continue;
+      if (sc.once && mode !== MODES[0]) continue;
       HARD = mode === 'hard';
       const label = `${sc.name}${HARD ? '［困難］' : ''}`;
       const t0 = Date.now();
@@ -517,6 +712,7 @@ async function main() {
     }
   } finally {
     sim.kill();
+    ibon.close();
     fs.rmSync(WORK, { recursive: true, force: true });
   }
   const passed = results.filter((r) => r.pass).length;

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { loadDelay, loadGaveUp, LOAD_FAIL_MAX_MS } from '../../lib/backoff.js';
+import { loadDelay, loadGaveUp, LOAD_FAIL_MAX_MS, parseRetryAfter, rateLimitDelay, RATE_MAX_RETRIES, RETRY_AFTER_MAX_MS } from '../../lib/backoff.js';
 import { probeOffset, crossingOffset } from '../../lib/clock.js';
 import { worstOf, summarizeHealth } from '../../lib/health.js';
 import { sanitizeBox } from '../../lib/box.js';
@@ -17,6 +17,33 @@ test('連續失敗超過 5 分鐘就放棄', () => {
   assert.equal(loadGaveUp(null, Date.now()), false);
   assert.equal(loadGaveUp(1000, 1000 + LOAD_FAIL_MAX_MS), false);
   assert.equal(loadGaveUp(1000, 1001 + LOAD_FAIL_MAX_MS), true);
+});
+
+test('Retry-After：秒數或 HTTP 日期；看不懂當成沒給', () => {
+  assert.equal(parseRetryAfter('2'), 2000);
+  assert.equal(parseRetryAfter(' 0 '), 0);
+  const now = Date.parse('2026-10-15T12:00:00Z');
+  assert.equal(parseRetryAfter('Thu, 15 Oct 2026 12:00:30 GMT', now), 30000);
+  assert.equal(parseRetryAfter('Thu, 15 Oct 2026 11:59:00 GMT', now), 0);   // 已經過了：不用等
+  assert.equal(parseRetryAfter(null), null);
+  assert.equal(parseRetryAfter(''), null);
+  assert.equal(parseRetryAfter('-5'), null);
+  assert.equal(parseRetryAfter('soon'), null);
+});
+
+test('請求太多（429）的讀取重試：照 Retry-After 等，沒給就 2、4、8 秒；最多 3 次；要等太久就交給使用者', () => {
+  const a = rateLimitDelay(0, 2000);
+  assert.equal(a.allow, true);
+  assert.equal(a.source, 'retry-after');
+  assert.ok(a.delayMs >= 2000 && a.delayMs <= 2500, String(a.delayMs));
+  assert.deepEqual([0, 1, 2].map((i) => rateLimitDelay(i, null).delayMs), [2000, 4000, 8000]);
+  assert.equal(rateLimitDelay(1, null).source, 'backoff');
+  assert.deepEqual(rateLimitDelay(RATE_MAX_RETRIES, null), { allow: false, reason: 'limit' });
+  assert.equal(rateLimitDelay(RATE_MAX_RETRIES, 1000).allow, false);       // 有給 Retry-After 也有次數上限
+  const long = rateLimitDelay(0, RETRY_AFTER_MAX_MS + 1);
+  assert.equal(long.allow, false);
+  assert.equal(long.reason, 'too-long');
+  assert.equal(rateLimitDelay(0, RETRY_AFTER_MAX_MS).allow, true);
 });
 
 test('對時：伺服器在請求來回正中間產生 Date', () => {
