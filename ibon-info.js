@@ -1,9 +1,10 @@
-// 這個檔案由 tools/build.mjs 從 src/info/、src/agent/05-dom.js 和 lib/eventinfo.js 產生，請改那些地方，不要直接改這裡。
+// 這個檔案由 tools/build.mjs 從 src/info/、src/agent/05-dom.js 和 lib/eventinfo.js、lib/ibon.js 產生，請改那些地方，不要直接改這裡。
 /*
  * ibon-info.js —— 活動資訊讀取程式（A 類，只讀），跑在 ISOLATED world
  *
- * 只在 ibon 的活動頁（https://ticket.ibon.com.tw/ActivityInfo/Details/*）載入，而且只有背景程式要它讀時才讀：
- * 讀標題、售票平台、場次表、節目介紹裡的票價與開賣時間，整理後交給背景程式，顯示在擴充功能的設定頁。
+ * 載入到 ibon 的活動頁（https://ticket.ibon.com.tw/ActivityInfo/Details/*）與購票頁（https://orders.ibon.com.tw/application/UTK02/*），
+ * 只有背景程式要它讀時才讀（IbonAdapter，20-adapter.js）：活動頁讀標題、場次表、節目介紹裡的票價與開賣時間；
+ * 任何一頁都可以讀頁面種類、登入狀態、狀態提示，或在你按了之後記錄結構快照。整理後交給背景程式，顯示在設定頁。
  *
  * 這支程式不點任何按鈕、不填任何欄位、不送出任何東西，也不發任何網路請求；購票按鈕只讀上面的字和能不能按。
  * 自動選購的程式（agent.js）不會載入到 ibon 的頁面。
@@ -234,8 +235,207 @@
       saleTimes: arr(i.saleTimes, 10).map(obj).map((x) => ({ at: iso(x.at), text: str(x.text, 300) })).filter((x) => x.at),
       limits: arr(i.limits, 6).map((l) => str(l, 200)).filter(Boolean),
       warnings: arr(i.warnings, 5).map((w) => str(w, 200)).filter(Boolean),
+      login: i.login && typeof i.login === 'object'
+        ? { state: ['logged-out', 'unknown'].includes(i.login.state) ? i.login.state : 'unknown', verified: i.login.verified === true, msg: str(i.login.msg, 200) }
+        : null,
       readAt: Number.isFinite(i.readAt) ? i.readAt : now,
     };
+  }
+
+  /* ───── 內嵌 lib/ibon.js ───── */
+  // ibon 售票系統的整合規則（純函式，不碰網頁）：頁面分類、操作政策、活動資訊驗證、需求比對、結構快照的個資遮罩。
+  // 「已驗證」是在真站看過的（2026-10-15，活動 39972）；其他是推測，照實標出來，不當成已知。
+
+  /**
+   * 網址 → ibon 頁面種類；不是 ibon 回 null。
+   *   activity        活動頁 ticket.ibon.com.tw/ActivityInfo/Details/<數字>（已驗證）
+   *   go-ticket       活動頁「線上購票」的轉址 /ActivityInfo/GoTicketURL（已驗證：真站資料裡的連結）
+   *   purchase-entry  購票流程入口 orders.ibon.com.tw/application/UTK02/UTK0201_000.aspx（網址已驗證；頁面結構還沒看過）
+   *   purchase        購票流程的其他頁 orders.ibon.com.tw/application/UTK02/…（推測）
+   *   ticket-other、orders-other  同網域的其他頁
+   */
+  function ibonPageKind(url) {
+    let u;
+    try { u = new URL(String(url || '').trim()); } catch (_) { return null; }
+    if (u.protocol !== 'https:') return null;
+    if (u.hostname === 'ticket.ibon.com.tw') {
+      if (/^\/ActivityInfo\/Details\/\d+\/?$/.test(u.pathname)) return 'activity';
+      if (/^\/ActivityInfo\/GoTicketURL\/?$/i.test(u.pathname)) return 'go-ticket';
+      return 'ticket-other';
+    }
+    if (u.hostname === 'orders.ibon.com.tw') {
+      if (/^\/application\/UTK02\/UTK0201_000\.aspx$/i.test(u.pathname)) return 'purchase-entry';
+      if (/^\/application\/UTK02\//i.test(u.pathname)) return 'purchase';
+      return 'orders-other';
+    }
+    return null;
+  }
+
+  const isIbonPage = (url) => ibonPageKind(url) != null;
+
+  /** 頁面種類給人看的名字，以及這種頁的結構有沒有在真站核對過 */
+  const IBON_PAGE_INFO = {
+    activity: { label: '活動頁', verified: true },
+    'go-ticket': { label: '線上購票轉址', verified: true },
+    'purchase-entry': { label: '購票流程入口（UTK0201）', verified: false },
+    purchase: { label: '購票流程的其他頁', verified: false },
+    'ticket-other': { label: 'ibon 售票網的其他頁', verified: false },
+    'orders-other': { label: 'ibon 訂購網域的其他頁', verified: false },
+  };
+
+  /*
+   * 操作政策：每種操作在 ibon 上怎麼處理。
+   *   auto    助手可以自己做（只讀或只在擴充功能裡計算，不碰網站）
+   *   manual  你自己在網站上做，助手只提示；要等 ibon 確認認可這類擴充功能才會評估自動化
+   *   never   助手不做，也不提供任何繞過方式
+   * basis 是依據（服務條款條次、購票須知原文），設定頁照實顯示。
+   */
+  const IBON_POLICY = [
+    { action: 'read', label: '讀取你已經打開的頁面資訊', mode: 'auto', basis: '只讀頁面上看得到的內容，不送請求、不改變網站狀態' },
+    { action: 'compare', label: '比對你的票區、張數需求', mode: 'auto', basis: '在擴充功能裡計算，不碰網站' },
+    { action: 'snapshot', label: '記錄頁面結構快照（你按了才記）', mode: 'auto', basis: '只讀；遮掉 Email、電話、身分證、長數字，不記錄欄位內容' },
+    { action: 'select', label: '點選場次、票區', mode: 'manual', basis: '服務條款第十一條：不得以「非本公司認可之方式」使用本系統；第五條：請依照螢幕上程序操作' },
+    { action: 'quantity', label: '選張數', mode: 'manual', basis: '同上' },
+    { action: 'submit', label: '按「下一步」、送出訂單', mode: 'manual', basis: '同上；送出是不可逆的操作，一定由你自己按' },
+    { action: 'refresh', label: '開賣時自動重新整理', mode: 'manual', basis: '服務條款開頭敬告（不得以不正方式利用電腦程式搶購）、第十二條(4) 異常大量交易' },
+    { action: 'captcha', label: '驗證碼', mode: 'never', basis: '不繞過驗證機制，由你自己輸入' },
+    { action: 'queue', label: '排隊、流量控管', mode: 'never', basis: '不繞過；購票須知：「出現流量控管中，請耐心等候重新再試」' },
+    { action: 'limit', label: '超過限購（例如用其他帳號）', mode: 'never', basis: '服務條款第十一條(4) 重覆註冊帳號規避限制；購票須知「每位會員限購 N 張」' },
+    { action: 'payment', label: '付款', mode: 'never', basis: '一律由你自己付款，不保存任何付款資料' },
+  ];
+
+  const ibNorm = (s) => String(s == null ? '' : s).replace(/[\s　]+/g, ' ').trim();
+  /** 「2026-10-04T14:00」「2026-10-04」→ 本機時間的毫秒；看不懂回 NaN */
+  function localTime(iso) {
+    const m = String(iso || '').match(/^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2}))?$/);
+    if (!m) return NaN;
+    return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4] || 0), Number(m[5] || 0)).getTime();
+  }
+  const ibDt = (iso) => String(iso || '').replace('T', ' ').replace(/-/g, '/');
+  const ibDays = (ms) => Math.floor(ms / 86400000);
+
+  /**
+   * 讀到的活動資訊做基本檢查 → [{ level: 'warn' | 'info', msg }]。只提示，不擋任何事。
+   */
+  function validateEventInfo(info, now = Date.now()) {
+    const out = [];
+    const i = info || {};
+    const ss = Array.isArray(i.sessions) ? i.sessions : [];
+    if (!i.title) out.push({ level: 'warn', msg: '沒有讀到活動名稱' });
+    if (!ss.length) out.push({ level: 'warn', msg: '沒有讀到任何場次（可能還沒開放、已下架，或頁面結構改了）' });
+    const noDate = ss.filter((s) => !s.date);
+    if (noDate.length) out.push({ level: 'warn', msg: `${noDate.length} 個場次看不出日期` });
+    if (ss.length && ss.every((s) => s.status === 'sold-out')) out.push({ level: 'info', msg: '所有場次都顯示已售完' });
+    const ended = ss.filter((s) => s.saleEnd && localTime(s.saleEnd) <= now);
+    if (ended.length) out.push({ level: 'info', msg: `${ended.length} 個場次已過販售截止時間` });
+    const unknown = ss.filter((s) => s.status === 'unknown');
+    if (unknown.length) out.push({ level: 'warn', msg: `${unknown.length} 個場次的狀態看不出來（按鈕上的字沒見過）` });
+    const sale = (Array.isArray(i.saleTimes) ? i.saleTimes : []).map((x) => ({ ...x, t: localTime(x.at) })).filter((x) => Number.isFinite(x.t));
+    if (!sale.length) out.push({ level: 'info', msg: '節目介紹裡沒有認得的開賣時間' });
+    else {
+      const next = sale.filter((x) => x.t > now).sort((a, b) => a.t - b.t)[0];
+      if (next) out.push({ level: 'info', msg: `開賣時間 ${ibDt(next.at)}（還有 ${ibDays(next.t - now)} 天）` });
+      else out.push({ level: 'info', msg: `已經開賣（${ibDt(sale[0].at)}）` });
+    }
+    if (!(Array.isArray(i.prices) && i.prices.length)) out.push({ level: 'warn', msg: '節目介紹裡沒有認得的票價；實際票區與票價要在購票頁看' });
+    return out;
+  }
+
+  /** 限購規定的原文 → 一般會員每次最多幾張（身障、陪同票的另外規定不算）；看不出來回 null */
+  function memberLimit(limits) {
+    let min = null;
+    for (const line of Array.isArray(limits) ? limits : []) {
+      if (/身障|身心障礙|陪同|周邊|商品/.test(line)) continue;
+      const m = String(line).match(/限購\s*(\d{1,2})\s*張/);
+      if (m) min = min == null ? Number(m[1]) : Math.min(min, Number(m[1]));
+    }
+    return min;
+  }
+
+  /** 設定頁的需求（票區偏好一行一個、張數、最高單價）→ 整理過的格式 */
+  function parseIbonPrefs(raw) {
+    const r = raw || {};
+    const areas = String(r.areas || '').split(/\n+/).map(ibNorm).filter(Boolean).slice(0, 10);
+    const qty = Number.parseInt(r.qty, 10);
+    const maxPrice = Number.parseInt(String(r.maxPrice || '').replace(/[,，\s]/g, ''), 10);
+    return { areas, qty: Number.isInteger(qty) && qty > 0 ? qty : null, maxPrice: Number.isInteger(maxPrice) && maxPrice > 0 ? maxPrice : null };
+  }
+
+  const ibFold = (s) => ibNorm(s).toLowerCase().replace(/\s+/g, '');
+
+  /**
+   * 需求 → 跟活動資訊比對（只計算，不碰網站）。
+   * 票區只對得到節目介紹寫的票價表；實際能買的票區、剩餘數量要在購票頁看。
+   * 回 { qty: { want, limit, ok, msg }, areas: [{ pref, hits, ok, msg }], onSale, msgs }
+   */
+  function matchIbonPrefs(info, prefsRaw) {
+    const prefs = parseIbonPrefs(prefsRaw);
+    const i = info || {};
+    const prices = Array.isArray(i.prices) ? i.prices : [];
+    const limit = memberLimit(i.limits);
+    const qty = { want: prefs.qty, limit, ok: true, msg: '' };
+    if (prefs.qty == null) { qty.ok = false; qty.msg = '還沒設定張數'; }
+    else if (limit != null && prefs.qty > limit) { qty.ok = false; qty.msg = `${prefs.qty} 張超過限購 ${limit} 張：網站不會接受，助手也不會用其他帳號幫你繞過`; }
+    else qty.msg = limit != null ? `${prefs.qty} 張，在限購 ${limit} 張以內` : `${prefs.qty} 張（購票須知裡沒有認得的限購規定）`;
+
+    const areas = prefs.areas.map((pref) => {
+      const words = pref.split(/\s+/).map(ibFold).filter(Boolean);
+      const named = prices.filter((p) => p.name && words.every((w) => ibFold(p.name).includes(w)));
+      const hits = prefs.maxPrice ? named.filter((p) => p.price <= prefs.maxPrice) : named;
+      let msg;
+      if (!named.length) msg = `「${pref}」：節目介紹的票價表裡沒有這個票區`;
+      else if (!hits.length) msg = `「${pref}」：${named.map((p) => `${p.name} NT$${p.price}`).join('、')} 都超過你設定的最高單價 NT$${prefs.maxPrice}`;
+      else msg = `「${pref}」：${hits.map((p) => `${p.name} NT$${p.price}`).join('、')}`;
+      return { pref, hits, ok: hits.length > 0, msg };
+    });
+    const ss = Array.isArray(i.sessions) ? i.sessions : [];
+    const onSale = ss.filter((s) => s.status === 'on-sale').length;
+    const msgs = [];
+    if (!prefs.areas.length) msgs.push('還沒設定票區偏好');
+    if (prices.length && prefs.areas.length && !areas.some((a) => a.ok)) msgs.push('偏好的票區都對不到節目介紹的票價表，請確認名稱（照網站上的寫法）');
+    if (ss.length && !onSale) msgs.push('目前沒有販售中的場次');
+    return { qty, areas, onSale, msgs };
+  }
+
+  /**
+   * 結構快照用：把可能是個資的文字遮掉（Email、手機、身分證字號、6 碼以上的連續數字如卡號、序號）。
+   * 日期（2026-10-04、2026/10/04）、時間、有千分位的金額保留。姓名這類沒有固定格式的，遮不到，要請你自己看過再交出去。
+   */
+  function maskText(s) {
+    return String(s == null ? '' : s)
+      .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '[email]')
+      .replace(/\b[A-Za-z][12]\d{8}\b/g, '[身分證]')
+      .replace(/(?:\+?886[-\s]?|\b0)9\d{2}[-\s]?\d{3}[-\s]?\d{3}\b/g, '[手機]')
+      .replace(/\d[\d\s-]{4,}\d/g, (m) => (/^\d{4}[-/]\d{1,2}[-/]\d{1,2}$/.test(m) || /^\d{1,2}:\d{2}$/.test(m) ? m : '[數字]'));
+  }
+
+  /** 網址只留來源與路徑，查詢參數只留名稱（值可能是訂單、會員之類的編號） */
+  function maskUrl(href, base) {
+    try {
+      const u = new URL(href, base);
+      const keys = [...new Set(u.searchParams.keys())];
+      return `${u.origin}${u.pathname}${keys.length ? `?${keys.map((k) => `${k}=…`).join('&')}` : ''}`;
+    } catch (_) {
+      return '';
+    }
+  }
+
+  /**
+   * 頁面上的文字 → 可能的狀態提示（只是提示，購票頁的結構還沒在真站看過，所以都標「未驗證」）。
+   * 活動頁的狀態不靠這個：活動頁直接讀場次表的按鈕（已驗證）。
+   */
+  const STATE_HINTS = [
+    ['captcha', /驗證碼|captcha|請輸入圖形|機器人/i, '頁面上有驗證碼相關的字：由你自己處理'],
+    ['queue', /排隊|等候室|流量控管|請耐心等候|人數眾多/, '頁面上有排隊或流量控管的字：請等候，不要重複整理'],
+    ['sold-out', /已售完|售完|完售|額滿/, '頁面上有售完的字'],
+    ['not-open', /尚未開賣|即將開賣|尚未開放|未開賣/, '頁面上有尚未開賣的字'],
+    ['login', /請先登入|會員登入|登入逾時/, '頁面要求登入：請自己登入'],
+    ['limit', /超過.{0,6}限購|購買上限|已達.{0,4}上限/, '頁面提到購買上限'],
+    ['error', /系統忙碌|系統錯誤|發生錯誤|請稍後再試|Error|錯誤代碼/i, '頁面上有錯誤訊息'],
+  ];
+  function stateHints(text) {
+    const t = String(text || '');
+    return STATE_HINTS.filter(([, re]) => re.test(t)).map(([state, re, msg]) => ({ state, msg, evidence: ibNorm((t.match(re) || [''])[0]).slice(0, 20), verified: false }));
   }
 
   /* ───────────────────────── 語意定位 ─────────────────────────
@@ -401,18 +601,126 @@
     };
   }
 
+  /* ───────────────────────── IbonAdapter（只讀） ─────────────────────────
+   * ibon 的頁面轉接，跟模擬站的 POOL（src/agent/10-pool.js）分開。
+   * 這裡只有讀取：頁面種類、活動資訊、登入狀態、狀態提示、這一頁助手能做什麼、結構快照。
+   * 沒有任何點擊、填值、送出的函式：網站上的操作照 lib/ibon.js 的 IBON_POLICY，一律由你自己做。 */
+
+  /** 看得到的文字，連同 Shadow DOM（包括封閉的）裡的文字；innerText 本身不會進到 Shadow DOM */
+  function visibleText() {
+    const parts = [document.body ? document.body.innerText : ''];
+    for (const host of deepAll('*')) {
+      const sr = shadowOf(host);
+      if (sr) for (const c of sr.children) if (c.innerText) parts.push(c.innerText);
+    }
+    return parts.join('\n');
+  }
+
+  /**
+   * 結構快照（你按了才記）：標籤、id、class、角色、欄位名稱、按鈕與標籤上的字、下拉選單的選項，連同封閉的 Shadow DOM。
+   * 不記錄欄位裡填的內容；文字經過 maskText（遮 Email、手機、身分證、長數字），網址只留路徑與參數名稱。
+   * 姓名這類沒有固定格式的字遮不到，交出去之前請自己看過。
+   */
+  const SNAP = { nodes: 3000, depth: 40, text: 60 };
+  function snapshotStructure() {
+    let count = 0;
+    const attr = (el, out) => {
+      for (const a of ['name', 'type', 'role', 'aria-label', 'for', 'title', 'placeholder']) {
+        if (el.hasAttribute(a)) out[a] = maskText(el.getAttribute(a)).slice(0, 40);
+      }
+      if (el.disabled || el.getAttribute('aria-disabled') === 'true') out.disabled = true;
+    };
+    const walk = (el, depth) => {
+      if (count >= SNAP.nodes || depth > SNAP.depth) return null;
+      count++;
+      const tag = el.tagName.toLowerCase();
+      const out = { t: tag };
+      if (el.id) out.id = maskText(el.id).slice(0, 40);
+      const cls = [...el.classList].slice(0, 4);
+      if (cls.length) out.c = cls.join(' ');
+      attr(el, out);
+      if (tag === 'a' && el.getAttribute('href')) out.href = maskUrl(el.getAttribute('href'), location.href);
+      if (tag === 'form' && el.getAttribute('action')) out.action = maskUrl(el.getAttribute('action'), location.href);
+      if (tag === 'img') { out.alt = maskText(el.alt).slice(0, 40); if (el.getAttribute('src')) out.src = maskUrl(el.getAttribute('src'), location.href); }
+      if (tag === 'input' || tag === 'textarea') { if (el.value) out.filled = true; return out; }   // 只記「有沒有填」，不記內容
+      if (tag === 'select') { out.options = [...el.options].slice(0, 30).map((o) => maskText(norm(o.text)).slice(0, 40)); return out; }
+      if (tag === 'iframe') { out.src = maskUrl(el.getAttribute('src') || '', location.href); return out; }
+      if (['script', 'style', 'noscript', 'svg', 'template', 'canvas', 'video'].includes(tag)) return out;
+      const own = norm([...el.childNodes].filter((n) => n.nodeType === Node.TEXT_NODE).map((n) => n.nodeValue).join(' '));
+      if (own) out.x = maskText(own).slice(0, SNAP.text);
+      const kids = [];
+      const sr = shadowOf(el);
+      if (sr) kids.push({ t: '#shadow-root', mode: el.shadowRoot ? 'open' : 'closed', k: [...sr.children].map((c) => walk(c, depth + 1)).filter(Boolean) });
+      for (const c of el.children) { const w = walk(c, depth + 1); if (w) kids.push(w); }
+      if (kids.length) out.k = kids;
+      return out;
+    };
+    const tree = document.body ? walk(document.body, 0) : null;
+    return {
+      kind: ibonPageKind(location.href), url: maskUrl(location.href), title: maskText(document.title).slice(0, 100),
+      takenAt: Date.now(), nodes: count, truncated: count >= SNAP.nodes, tree,
+    };
+  }
+
+  const IbonAdapter = {
+    id: 'ibon',
+
+    /** 頁面種類（lib/ibon.js 的 ibonPageKind：照網址） */
+    pageKind: () => ibonPageKind(location.href),
+
+    /** 活動頁：活動、場次、票價、開賣時間（真站核對過，活動 39972） */
+    readActivity: readIbonActivity,
+
+    /** 登入狀態：頁首看得到「快速登入」＝沒登入（真站看過）；看不到就說看不出來（登入後的頁首還沒在真站核對過） */
+    loginState() {
+      const link = deepAll('a, button').find((el) => norm(el.textContent) === '快速登入' && isVisible(el));
+      return link
+        ? { state: 'logged-out', verified: true, msg: '頁首有「快速登入」：目前沒有登入。購票前請先登入（購票須知也這樣要求）' }
+        : { state: 'unknown', verified: false, msg: '頁首沒看到「快速登入」，可能已經登入（登入後的頁首還沒在真站核對過）' };
+    },
+
+    /**
+     * 這一頁的狀態：頁面種類、登入、狀態提示。
+     * 活動頁的場次狀態要讀場次表（readActivity）；購票頁還沒有真站結構，只照頁面上的字給提示，一律標「未驗證」。
+     */
+    readState() {
+      const kind = IbonAdapter.pageKind();
+      const page = IBON_PAGE_INFO[kind] || { label: '不是 ibon 的頁面', verified: false };
+      const hints = kind === 'activity' ? [] : stateHints(visibleText());
+      return { kind, label: page.label, verified: page.verified, login: IbonAdapter.loginState(), hints, policy: IBON_POLICY };
+    },
+
+    /** 這一頁助手能做什麼、要你自己做什麼（lib/ibon.js 的 IBON_POLICY） */
+    supportedActions: () => IBON_POLICY,
+
+    /** 結構快照：給開發真實購票頁的唯讀解析用 */
+    snapshot: snapshotStructure,
+  };
+
   /* ───────────────────────── 啟動 ─────────────────────────
    * 載入時問背景程式：這個分頁是不是它開來讀資訊的？是才讀。你自己開著的活動頁，背景程式也可以直接要它讀一次。
    * 兩種情況都只讀，讀完把整理好的資訊交回去。 */
 
   async function readAndBuild() {
-    const raw = await readIbonActivity(15000);
-    return { ok: true, info: { ...buildEventInfo(raw, Date.now()), warnings: raw.warnings } };
+    if (IbonAdapter.pageKind() !== 'activity') return { ok: false, error: '這一頁不是活動頁' };
+    const raw = await IbonAdapter.readActivity(15000);
+    const login = IbonAdapter.loginState();
+    return { ok: true, info: { ...buildEventInfo(raw, Date.now()), warnings: raw.warnings, login } };
   }
 
+  /* 背景程式要的東西（只接受擴充功能自己送來的）：
+   *   info-read      讀活動頁的資訊
+   *   page-state     這一頁的種類、登入、狀態提示、操作政策
+   *   page-snapshot  結構快照 */
+  const HANDLERS = {
+    'info-read': readAndBuild,
+    'page-state': async () => ({ ok: true, state: IbonAdapter.readState() }),
+    'page-snapshot': async () => ({ ok: true, snapshot: IbonAdapter.snapshot() }),
+  };
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-    if (!msg || msg.type !== 'info-read' || sender.id !== chrome.runtime.id) return false;
-    readAndBuild().then(sendResponse, (e) => sendResponse({ ok: false, error: String((e && e.message) || e) }));
+    const fn = msg && HANDLERS[msg.type];
+    if (!fn || sender.id !== chrome.runtime.id) return false;
+    fn().then(sendResponse, (e) => sendResponse({ ok: false, error: String((e && e.message) || e) }));
     return true;
   });
 

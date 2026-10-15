@@ -41,6 +41,9 @@ const nextWholeSecond = (msAhead) => Math.ceil((Date.now() + msAhead) / 1000) * 
 // 連網路層都到不了真的網站（擴充功能自己開的分頁也一樣）
 const IBON_FIXTURE = fs.readFileSync(path.join(HERE, 'fixtures', 'ibon-activity.html'), 'utf8');
 const IBON_URL = 'https://ticket.ibon.com.tw/ActivityInfo/Details/990001';
+// 購票流程頁的樣本（虛構，結構是假設的）：網址照真站資料裡的格式
+const IBON_PURCHASE_FIXTURE = fs.readFileSync(path.join(HERE, 'fixtures', 'ibon-purchase.html'), 'utf8');
+const IBON_PURCHASE_URL = 'https://orders.ibon.com.tw/application/UTK02/UTK0201_000.aspx?PERFORMANCE_ID=TEST1&PRODUCT_ID=TEST2';
 
 const PROFILE = { name: '測試使用者', phone: '0912-345-678', email: 'tester@example.com', note: '' };
 
@@ -76,9 +79,11 @@ function startIbonFixture() {
     '-subj', '/CN=ticket.ibon.com.tw', '-addext', 'subjectAltName=DNS:ticket.ibon.com.tw,DNS:*.ibon.com.tw'], { stdio: 'ignore' });
   const server = https.createServer({ key: fs.readFileSync(path.join(WORK, 'ibon-key.pem')), cert: fs.readFileSync(path.join(WORK, 'ibon-cert.pem')) }, (req, res) => {
     ibonRequests.push(`${req.method} ${req.url}`);
-    if (req.method === 'GET' && req.url === new URL(IBON_URL).pathname) {
+    const pages = { [new URL(IBON_URL).pathname]: IBON_FIXTURE, [new URL(IBON_PURCHASE_URL).pathname]: IBON_PURCHASE_FIXTURE };
+    const body = req.method === 'GET' && pages[req.url.split('?')[0]];
+    if (body) {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-      return res.end(IBON_FIXTURE);
+      return res.end(body);
     }
     res.writeHead(404);
     res.end();
@@ -114,7 +119,7 @@ async function scenario(ctx, preset, query = '') {
 }
 
 async function fillPopup(popup, o = {}) {
-  await popup.evaluate(() => { document.querySelector('details').open = true; });
+  await popup.evaluate(() => { document.getElementById('advanced').open = true; });   // 進階設定（設定頁裡還有別的 <details>，要指名）
   await popup.fill('#eventUrl', o.url || `${BASE}/pool/`);
   await popup.fill('#keywords', (o.keywords || ['11/20 06:00']).join('\n'));
   await popup.fill('#tickets', (o.tickets || ['全票 2', '兒童票 1']).join('\n'));
@@ -612,6 +617,9 @@ const SCENARIOS = [
       const requests = ibonRequests;
       await popup.fill('#eventUrl', IBON_URL);
       await sleep(600);
+      await popup.fill('#ibonAreas', '全票\n看台\n搖滾區');
+      await popup.fill('#ibonQty', '2');
+      await popup.fill('#ibonMaxPrice', '250');
       const hint = await popup.textContent('#regUrl');
       const runOff = [];
       for (const id of ['#btnSchedule', '#btnRunNow', '#btnCheck', '#btnHealth']) if (await popup.isDisabled(id)) runOff.push(id);
@@ -622,6 +630,9 @@ const SCENARIOS = [
       await popup.waitForFunction(() => document.querySelector('#infoMsg').textContent !== '' && !/讀取中/.test(document.querySelector('#infoMsg').textContent), null, { timeout: 40000 });
       const msg = await popup.textContent('#infoMsg');
       const view = await popup.textContent('#infoView');
+      const matchText = await popup.textContent('#matchView');
+      const checkText = await popup.textContent('#checkView');
+      const policyText = await popup.textContent('#policyView');
       const info = (await popup.evaluate(() => chrome.storage.local.get('eventInfo'))).eventInfo || {};
       await sleep(500);
       const pagesAfter = ctx.pages().length;
@@ -659,12 +670,57 @@ const SCENARIOS = [
         ['票區與票價（退票規則的 $50 不算）', JSON.stringify(info.prices) === JSON.stringify([{ name: '全票', price: 300 }, { name: '優待票', price: 200 }, { name: '2樓看台', price: 150 }]), JSON.stringify(info.prices)],
         ['開賣時間', (info.saleTimes || []).length === 1 && info.saleTimes[0].at === '2026-11-20T12:00', JSON.stringify(info.saleTimes)],
         ['限購規定只從購票須知讀（收合的也讀得到；周邊商品的不算）', JSON.stringify(info.limits) === '["每位會員限購4張。"]', JSON.stringify(info.limits)],
+        ['需求比對：看台對到、全票超過最高單價、搖滾區沒有、2 張在限購 4 張以內', /✓ 「看台」：2樓看台 NT\$150/.test(matchText) && /✗ 「全票」：全票 NT\$300 都超過你設定的最高單價 NT\$250/.test(matchText) && /✗ 「搖滾區」：節目介紹的票價表裡沒有這個票區/.test(matchText) && /✓ 張數：2 張，在限購 4 張以內/.test(matchText), matchText.slice(0, 120)],
+        ['資料檢查：還沒開賣、有幾天', /開賣時間 2026\/11\/20 12:00（還有 \d+ 天）/.test(checkText), checkText],
+        ['登入狀態：頁首有「快速登入」＝沒登入', info.login && info.login.state === 'logged-out' && info.login.verified === true, JSON.stringify(info.login)],
+        ['操作政策：點選、張數、送出由你自己做；驗證碼、付款助手不做', /你自己做點選場次、票區/.test(policyText) && /你自己做按「下一步」、送出訂單/.test(policyText) && /不做驗證碼/.test(policyText) && /不做付款/.test(policyText), policyText.slice(0, 80)],
         ['設定頁顯示讀到的資訊', /夜間入場（第一梯）/.test(view) && /NT\$300/.test(view) && /2026\/11\/20 12:00/.test(view), view.slice(0, 80)],
         ['背景分頁也是本機樣本伺服器回的（沒有連到真站）', bgLoads === 1 && /示範游泳池/.test(info.title || ''), `本機收到 ${bgLoads} 次`],
         ['讀完關掉背景分頁', pagesAfter === pagesBefore, `${pagesBefore} → ${pagesAfter}`],
         ['開著的活動頁直接讀，不另外載入', loadsAfter === loadsBefore && mineOpen, `載入 ${loadsBefore} → ${loadsAfter}、你的分頁${mineOpen ? '還在' : '被關了'}`],
         ['沒有點任何按鈕、沒有送出任何東西', clicked.length === 0 && nonGet.length === 0, `點擊 ${clicked.length}、非 GET 請求 ${nonGet.length}`],
         ['立即執行、檢查時段都拒絕 ibon 網址', !run.ok && /只能「讀取活動資訊」/.test(run.error || '') && !check.ok && /只能「讀取活動資訊」/.test(check.error || ''), `${run.error}｜${check.error}`],
+        ['沒有建立任務', s.task.phase === 'none', `任務 ${s.task.phase}`],
+      ];
+    },
+  },
+  {
+    name: 'ibon-purchase-page',
+    once: true,
+    title: 'ibon 購票頁（虛構樣本）：只讀狀態並標「未驗證」；結構快照讀得到封閉 Shadow DOM、遮掉個資、不記欄位內容；不點任何東西',
+    async run({ ctx, popup }) {
+      ibonRequests.length = 0;
+      const page = await ctx.newPage();
+      await page.goto(IBON_PURCHASE_URL);
+      await sleep(800);
+      await popup.bringToFront();
+      await popup.fill('#eventUrl', IBON_URL);
+      await sleep(600);
+      await popup.click('#btnPage');
+      await popup.waitForFunction(() => !/讀取中/.test(document.getElementById('pageMsg').textContent), null, { timeout: 15000 });
+      const pageMsg = await popup.textContent('#pageMsg');
+      const pageView = await popup.textContent('#pageView');
+      const [download] = await Promise.all([popup.waitForEvent('download', { timeout: 15000 }), popup.click('#btnSnapshot')]);
+      const file = await download.path();
+      const raw = fs.readFileSync(file, 'utf8');
+      const snap = JSON.parse(raw);
+      const snapMsg = await popup.textContent('#pageMsg');
+      const findShadow = (n) => !!n && ((n.t === '#shadow-root' && n.mode === 'closed') || (n.k || []).some(findShadow));
+      const inputs = [];
+      (function walk(n) { if (!n) return; if (n.t === 'input') inputs.push(n); for (const k of n.k || []) walk(k); })(snap.tree);
+      const clicked = ibonRequests.filter((r) => /__clicked/.test(r));
+      const nonGet = ibonRequests.filter((r) => !r.startsWith('GET '));
+      const s = await status(popup);
+      return [
+        ['認得是購票流程入口，並標明結構還沒在真站核對', /購票流程入口（UTK0201）（這種頁面的結構還沒在真站核對過）/.test(pageView), pageView.slice(0, 60)],
+        ['驗證碼提示（未驗證）', /驗證碼相關的字.*未驗證/.test(pageView), pageView],
+        ['提醒這一頁的操作由你自己做', /點選、張數、下一步、驗證碼、付款都由你自己操作/.test(pageView), pageMsg],
+        ['快照：頁面種類與網址（參數只留名稱）', snap.kind === 'purchase-entry' && snap.url === 'https://orders.ibon.com.tw/application/UTK02/UTK0201_000.aspx?PERFORMANCE_ID=…&PRODUCT_ID=…', `${snap.kind}｜${snap.url}`],
+        ['快照：讀得到封閉 Shadow DOM 裡的票區', findShadow(snap.tree) && raw.includes('示範看台區') && raw.includes('NT$150'), `${snap.nodes} 個節點`],
+        ['快照：Email、手機遮掉；參數值、表單送出網址的參數值不留', !raw.includes('member@example.com') && !raw.includes('0912-345-678') && raw.includes('[email]') && raw.includes('[手機]') && !raw.includes('TEST1') && !raw.includes('abc123'), ''],
+        ['快照：欄位只記有沒有填，不記內容', !raw.includes('ABCD') && inputs.some((i) => i.filled === true), JSON.stringify(inputs)],
+        ['設定頁說明已存檔與注意事項', /已存成檔案：\d+ 個節點、1 個 Shadow DOM/.test(snapMsg) && /姓名這類遮不到/.test(snapMsg), snapMsg],
+        ['沒有點任何按鈕、沒有送出任何東西', clicked.length === 0 && nonGet.length === 0, `點擊 ${clicked.length}、非 GET 請求 ${nonGet.length}`],
         ['沒有建立任務', s.task.phase === 'none', `任務 ${s.task.phase}`],
       ];
     },

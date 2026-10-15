@@ -28,6 +28,7 @@ import { sanitizeBox, BLACKBOX_MAX } from './lib/box.js';
 import { siteOf, targetUrlOf, siteKey, siteLabel, pageKindOf, infoSiteOf, infoUrlOf, INFO_SITES } from './lib/sites.js';
 import { parseTicketLines, cleanProfile, checkProfile, describeProfileProblem } from './lib/flow.js';
 import { sanitizeInfo } from './lib/eventinfo.js';
+import { ibonPageKind, isIbonPage, IBON_PAGE_INFO, IBON_POLICY, validateEventInfo, matchIbonPrefs } from './lib/ibon.js';
 
 const ALARM_OPEN = 'ith-open';
 const ALARM_WATCH = 'ith-watch';
@@ -98,7 +99,8 @@ function normalizeCfg(raw) {
 
 const URL_HINT = '網址看不懂。目前只支援本機的一般票券模擬站，請貼 http://127.0.0.1:3300/pool/';
 const INFO_ONLY_HINT = 'ibon 活動頁目前只能「讀取活動資訊」：排程、立即執行、檢查時段、健檢只支援本機的一般票券模擬站；在真實網站自動選票、送出還在確認網站規則與法律適用，所以停用';
-const urlHint = (url) => (infoSiteOf(url) ? INFO_ONLY_HINT : URL_HINT);
+const IBON_OTHER_HINT = '這是 ibon 的購票流程或其他頁面：選購功能不支援 ibon。網址欄請貼活動頁網址；購票頁請用「讀取目前的 ibon 分頁」看狀態';
+const urlHint = (url) => (infoSiteOf(url) ? INFO_ONLY_HINT : isIbonPage(url) ? IBON_OTHER_HINT : URL_HINT);
 /** 選購（排程、立即執行、繼續、檢查時段、健檢）接不接受這個網址：validate() 和設定頁的按鈕都用這一個判斷 */
 const runCheck = (url) => (targetUrlOf(url) ? { runnable: true, runNote: '' } : { runnable: false, runNote: urlHint(url) });
 
@@ -323,7 +325,14 @@ function finishCheck(tabId, result) {
 // 背景分頁編號 → { url, resolve, timer }
 const pendingInfo = new Map();
 
-async function readInfo(rawUrl) {
+/** 讀到（或存著）的活動資訊 → 加上資料檢查與需求比對（lib/ibon.js，只計算） */
+const withChecks = (r, prefs) => (r && r.ok && r.info ? { ...r, checks: validateEventInfo(r.info), match: matchIbonPrefs(r.info, prefs) } : r);
+
+async function readInfo(rawUrl, prefs) {
+  return withChecks(await readInfoRaw(rawUrl), prefs);
+}
+
+async function readInfoRaw(rawUrl) {
   const url = infoUrlOf(rawUrl);
   if (!url) return { ok: false, error: '這不是能讀取的活動頁。目前只支援 ibon 的活動頁：https://ticket.ibon.com.tw/ActivityInfo/Details/數字' };
   const open = (await chrome.tabs.query({})).find((t) => t.url && infoUrlOf(t.url) === url && !pendingInfo.has(t.id));
@@ -359,6 +368,25 @@ function finishInfo(tabId, result) {
     pending.resolve({ ok: false, error: (result && result.error) || '沒有讀到活動資訊' });
   }
   return true;
+}
+
+/** 目前的 ibon 分頁：優先找正在顯示的那一個，沒有就找最近用過的 */
+async function currentIbonTab() {
+  const tabs = (await chrome.tabs.query({})).filter((t) => t.url && isIbonPage(t.url) && !pendingInfo.has(t.id));
+  return tabs.find((t) => t.active) || tabs.sort((a, b) => (b.lastAccessed || 0) - (a.lastAccessed || 0))[0] || null;
+}
+
+/** 讀目前 ibon 分頁的狀態（op: state）或結構快照（op: snapshot）。只讀，頁面程式不點任何東西 */
+async function ibonPage(op) {
+  const tab = await currentIbonTab();
+  if (!tab) return { ok: false, error: '沒有開著的 ibon 分頁（活動頁或購票頁）' };
+  const kind = ibonPageKind(tab.url);
+  const r = await chrome.tabs.sendMessage(tab.id, { type: op === 'snapshot' ? 'page-snapshot' : 'page-state' }).catch(() => null);
+  if (!r) {
+    return { ok: false, kind, error: `這個分頁（${(IBON_PAGE_INFO[kind] || {}).label || kind}）沒有助手的讀取程式：只支援活動頁和購票頁；剛更新過擴充功能的話，請重新整理那一頁` };
+  }
+  if (op === 'snapshot' && r.ok) addLog(`記錄 ibon 結構快照：${(IBON_PAGE_INFO[kind] || {}).label || kind}，${r.snapshot.nodes} 個節點${r.snapshot.truncated ? '（超過上限，後面沒記）' : ''}`);
+  return { ...r, kind };
 }
 
 /* ───────────────────────── 頁面報到 ───────────────────────── */
@@ -586,8 +614,8 @@ chrome.tabs.onUpdated.addListener((tabId, info) => {
 
 /* ───────────────────────── 訊息入口 ───────────────────────── */
 
-const POPUP_TYPES = new Set(['schedule', 'run-now', 'resume', 'cancel', 'status', 'clear-logs', 'preview-url', 'check-slots', 'health-check', 'read-info']);
-// 只讀活動資訊的頁面（ibon 活動頁）只能送這兩種
+const POPUP_TYPES = new Set(['schedule', 'run-now', 'resume', 'cancel', 'status', 'clear-logs', 'preview-url', 'check-slots', 'health-check', 'read-info', 'match-info', 'ibon-page']);
+// ibon 的頁面（活動頁、購票頁）只能送這兩種
 const INFO_PAGE_TYPES = new Set(['info-hello', 'info-result']);
 const PAGE_TYPES = new Set(['hello', 'fired', 'fired-drift', 'retry', 'result', 'log', 'warn', 'abort-request', 'check-result', 'load-ok', 'clock', 'health-result', 'blackbox', 'skip-slot', 'rate-seen']);
 
@@ -598,8 +626,8 @@ async function handle(msg, sender) {
   const isExtensionPage = !!(sender && sender.id === chrome.runtime.id && typeof sender.url === 'string' && sender.url.startsWith(extOrigin));
   const fromTab = !isExtensionPage && !!(sender && sender.tab);
 
-  if (fromTab && infoSiteOf(sender.url || sender.tab.url)) {
-    // ibon 活動頁：只收讀取活動資訊的訊息，碰不到任何選購任務
+  if (fromTab && isIbonPage(sender.url || sender.tab.url)) {
+    // ibon 的頁面：只收讀取活動資訊的訊息，碰不到任何選購任務
     if (!INFO_PAGE_TYPES.has(type)) return { ok: false, error: 'not allowed' };
     const tabId = sender.tab.id;
     if (type === 'info-hello') return { read: pendingInfo.has(tabId) };
@@ -720,14 +748,22 @@ async function handle(msg, sender) {
     case 'resume': return resume(msg.cfg);
     case 'check-slots': return openCheck('check', msg.cfg);
     case 'health-check': return openCheck('health', msg.cfg);
-    case 'read-info': return readInfo(msg.url);
+    case 'read-info': return readInfo(msg.url, msg.prefs);
+    case 'match-info': {
+      const { eventInfo = null } = await get('eventInfo');
+      if (!eventInfo) return { ok: false, error: '還沒有讀過活動資訊' };
+      return withChecks({ ok: true, info: eventInfo }, msg.prefs);
+    }
+    case 'ibon-page': return ibonPage(msg.op);
     case 'cancel': return cancel();
     case 'clear-logs': await serial(() => set({ logs: [], blackbox: [] })); return { ok: true };
     case 'preview-url': {
       const site = siteOf(msg.url);
       const info = infoSiteOf(msg.url);
       // runnable／runNote：設定頁照這個決定選購按鈕能不能按、旁邊寫什麼原因（跟 validate() 同一個判斷，不會一邊能按一邊拒絕）
-      return { ok: true, regUrl: targetUrlOf(msg.url), site, label: site ? siteLabel(site) : null, info, infoUrl: infoUrlOf(msg.url), infoLabel: info ? INFO_SITES[info].label : null, ...runCheck(msg.url) };
+      const ibonKind = ibonPageKind(msg.url);
+      return { ok: true, regUrl: targetUrlOf(msg.url), site, label: site ? siteLabel(site) : null, info, infoUrl: infoUrlOf(msg.url), infoLabel: info ? INFO_SITES[info].label : null,
+        ibonKind, ibonLabel: ibonKind ? IBON_PAGE_INFO[ibonKind].label : null, policy: ibonKind ? IBON_POLICY : null, ...runCheck(msg.url) };
     }
     case 'status': {
       const { task = null, logs = [] } = await get(['task', 'logs']);

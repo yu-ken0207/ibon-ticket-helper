@@ -2,8 +2,8 @@
 // 產生兩支頁面程式（content script 不能用 ES module，所以共用模組在這裡拿掉 import / export 後內嵌）：
 //   agent.js      src/agent/ 底下的檔案依檔名順序串成一個 IIFE，00-core.js 之後內嵌 lib/ 的 format、clock、flow。
 //                 只載入到本機模擬站（選購流程）。
-//   ibon-info.js  src/info/ 加上共用的 src/agent/05-dom.js（只有找元素、讀文字的工具），內嵌 lib/eventinfo.js。
-//                 只載入到 ibon 活動頁，只讀資訊，裡面沒有選購流程的程式。
+//   ibon-info.js  src/info/ 加上共用的 src/agent/05-dom.js（只有找元素、讀文字的工具），內嵌 lib/eventinfo.js、lib/ibon.js。
+//                 只載入到 ibon 的活動頁與購票頁，只讀資訊（IbonAdapter），裡面沒有選購流程的程式。
 //
 // 用法：node tools/build.mjs           重新產生兩支
 //       node tools/build.mjs --check   只檢查是不是最新的，不是就以代碼 1 結束
@@ -17,9 +17,9 @@ const OUT = path.join(ROOT, 'agent.js');
 const LIBS = ['format.js', 'clock.js', 'flow.js'];
 const BANNER = '// 這個檔案由 tools/build.mjs 從 src/agent/ 和 lib/ 產生，請改那兩個地方，不要直接改這裡。\n';
 const INFO_OUT = path.join(ROOT, 'ibon-info.js');
-const INFO_PARTS = ['src/info/00-core.js', 'src/agent/05-dom.js', 'src/info/10-ibon.js', 'src/info/90-boot.js'];
-const INFO_LIBS = ['eventinfo.js'];
-const INFO_BANNER = '// 這個檔案由 tools/build.mjs 從 src/info/、src/agent/05-dom.js 和 lib/eventinfo.js 產生，請改那些地方，不要直接改這裡。\n';
+const INFO_PARTS = ['src/info/00-core.js', 'src/agent/05-dom.js', 'src/info/10-ibon.js', 'src/info/20-adapter.js', 'src/info/90-boot.js'];
+const INFO_LIBS = ['eventinfo.js', 'ibon.js'];
+const INFO_BANNER = '// 這個檔案由 tools/build.mjs 從 src/info/、src/agent/05-dom.js 和 lib/eventinfo.js、lib/ibon.js 產生，請改那些地方，不要直接改這裡。\n';
 
 function inlineLib(name) {
   const src = fs.readFileSync(path.join(ROOT, 'lib', name), 'utf8');

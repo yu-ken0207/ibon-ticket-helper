@@ -122,6 +122,9 @@ test('頁面交回來的資訊先過濾：只留認得的欄位，長度與數�
   assert.equal(s.priceLines.length, 10);
   assert.equal(s.readAt, 7);
   assert.deepEqual(sanitizeInfo(null, 1).sessions, []);
+  assert.deepEqual(sanitizeInfo({ login: { state: 'logged-out', verified: true, msg: 'x', extra: 1 } }).login, { state: 'logged-out', verified: true, msg: 'x' });
+  assert.equal(sanitizeInfo({ login: { state: 'admin' } }).login.state, 'unknown');
+  assert.equal(sanitizeInfo({}).login, null);
 });
 
 test('ibon 活動頁網址：只認活動頁；不屬於任何能自動選購的網站', () => {

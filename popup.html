@@ -17,12 +17,40 @@
   <p class="hint" id="regUrl"></p>
 
   <section id="infoBox" class="infobox" hidden>
+    <div class="boxtitle">ibon：助手只讀取與比對，網站上的操作由你自己做</div>
     <div class="checkrow">
       <button id="btnInfo" class="small" type="button">讀取活動資訊</button>
       <span class="hint">只讀活動頁上的場次、票價、開賣時間，不會選票、送出或購買</span>
     </div>
     <p id="infoMsg" class="hint" role="status"></p>
     <div id="infoView" class="infoview"></div>
+    <div id="checkView" class="infoview"></div>
+
+    <fieldset class="prefs">
+      <legend>我的需求（只比對，不會替你選）</legend>
+      <label class="field">票區偏好
+        <textarea id="ibonAreas" rows="2" placeholder="VIP&#10;A區" spellcheck="false"></textarea>
+      </label>
+      <p class="hint">一行一個，越上面越優先；同一行用空格隔開的字都要對到。名稱照網站上的寫法。</p>
+      <div class="row">
+        <label class="field">張數<input id="ibonQty" type="number" min="1" max="10" placeholder="2"></label>
+        <label class="field">最高單價（選填）<input id="ibonMaxPrice" type="number" min="1" placeholder="6000"></label>
+      </div>
+      <div id="matchView" class="infoview"></div>
+    </fieldset>
+
+    <div class="checkrow">
+      <button id="btnPage" class="small" type="button">讀取目前的 ibon 分頁</button>
+      <button id="btnSnapshot" class="small" type="button">記錄結構快照</button>
+    </div>
+    <p class="hint">在活動頁或購票頁時按：看這一頁是什麼頁、有沒有登入、有沒有驗證碼或排隊的字樣。結構快照是給開發「購票頁讀取」用的，會遮掉 Email、電話、身分證、長數字，也不記錄欄位內容；姓名遮不到，交出去之前請自己看過。</p>
+    <p id="pageMsg" class="hint" role="status"></p>
+    <div id="pageView" class="infoview"></div>
+
+    <details>
+      <summary>在 ibon 上，助手會做什麼、你要自己做什麼</summary>
+      <table id="policyView" class="policy"></table>
+    </details>
   </section>
 
   <label class="field">時段關鍵字
@@ -63,7 +91,7 @@
     <input id="openTime" type="datetime-local" step="1">
   </label>
 
-  <details>
+  <details id="advanced">
     <summary>進階設定</summary>
     <div class="row">
       <label class="field">提前開頁（秒）

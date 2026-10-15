@@ -45,7 +45,7 @@ function say(text, cls = '') {
 
 /* ───────────── 表單 ───────────── */
 
-const TEXT_FIELDS = ['eventUrl', 'keywords', 'tickets', 'openTime', 'preOpenSec', 'notOpenRetryMs', 'notOpenMaxRetries', 'failMaxRetries'];
+const TEXT_FIELDS = ['eventUrl', 'keywords', 'tickets', 'openTime', 'preOpenSec', 'notOpenRetryMs', 'notOpenMaxRetries', 'failMaxRetries', 'ibonAreas', 'ibonQty', 'ibonMaxPrice'];
 const PROFILE_FIELDS = [['profileName', 'name'], ['profilePhone', 'phone'], ['profileEmail', 'email'], ['profileNote', 'note']];
 
 function readForm() {
@@ -63,6 +63,9 @@ function readForm() {
     failMaxRetries: v('failMaxRetries'),
     syncClock: $('syncClock').checked,
     fallback: $('fallback').checked,
+    ibonAreas: v('ibonAreas'),
+    ibonQty: v('ibonQty'),
+    ibonMaxPrice: v('ibonMaxPrice'),
   };
   if (cfg.openTime) {
     const t = new Date(cfg.openTime).getTime();   // datetime-local 沒有時區，照本機時間解讀
@@ -117,13 +120,19 @@ async function previewUrl() {
   if ($('eventUrl').value.trim() !== url) return;   // 等回覆的時候網址又改了：這個結果已經過時，以後面那次為準
   runState = r.ok ? { runnable: !!r.runnable, note: r.runNote || '' } : { runnable: false, note: r.error || '背景程式沒有回應，請重新開啟這個視窗' };
   applyRunState();
-  $('infoBox').hidden = !(r.ok && r.info);
+  $('infoBox').hidden = !(r.ok && r.ibonKind);
+  renderPolicy(r.ok ? r.policy : null);
   if (r.ok && r.regUrl) { hint.textContent = `${r.label}，時段列表：${r.regUrl}`; hint.className = 'hint'; }
   else if (r.ok && r.info) {
     hint.textContent = `${r.infoLabel}的活動頁：只能讀取活動資訊。自動選票、送出還在確認中，不會執行`;
     hint.className = 'hint';
     const { eventInfo } = await chrome.storage.local.get('eventInfo');
-    renderInfo(eventInfo && eventInfo.url === r.infoUrl ? eventInfo : null);
+    const same = eventInfo && eventInfo.url === r.infoUrl;
+    renderInfo(same ? eventInfo : null);
+    if (same) matchSoon(0); else { renderChecks(null); renderMatch(null); }
+  } else if (r.ok && r.ibonKind) {
+    hint.textContent = `ibon 的${r.ibonLabel}：網址欄請貼活動頁網址才能讀活動資訊；這一頁請用下面的「讀取目前的 ibon 分頁」`;
+    hint.className = 'hint';
   } else { hint.textContent = '看不懂這個網址。選購只支援本機的一般票券模擬站（http://127.0.0.1:3300/pool/）；ibon 活動頁可以讀取活動資訊'; hint.className = 'hint bad'; }
 }
 
@@ -184,12 +193,104 @@ $('btnInfo').addEventListener('click', async () => {
   btn.disabled = true;
   out.textContent = '讀取中…（只讀，不會點任何按鈕）';
   out.className = 'hint';
-  const r = await send({ type: 'read-info', url: $('eventUrl').value.trim() });
+  const r = await send({ type: 'read-info', url: $('eventUrl').value.trim(), prefs: ibonPrefs() });
   out.textContent = r.ok ? '已讀取' : (r.error || '讀取失敗');
   out.className = 'hint ' + (r.ok ? 'good' : 'bad');
   renderInfo(r.ok ? r.info : null);
+  renderChecks(r.ok ? r.checks : null);
+  renderMatch(r.ok ? r.match : null);
   btn.disabled = false;
   refresh();
+});
+
+/* ───────────── ibon：需求比對、資料檢查、目前分頁、操作政策（都只讀） ───────────── */
+
+const ibonPrefs = () => ({ areas: $('ibonAreas').value, qty: $('ibonQty').value, maxPrice: $('ibonMaxPrice').value });
+
+function renderChecks(checks) {
+  const v = $('checkView');
+  v.replaceChildren();
+  if (!checks || !checks.length) return;
+  v.append(el('h3', {}, '資料檢查'));
+  for (const c of checks) v.append(el('div', { class: c.level === 'warn' ? 'warn' : 'hint' }, c.msg));
+}
+
+function renderMatch(m) {
+  const v = $('matchView');
+  v.replaceChildren();
+  if (!m) return;
+  for (const a of m.areas || []) v.append(el('div', { class: a.ok ? 'ok' : 'warn' }, `${a.ok ? '✓' : '✗'} ${a.msg}`));
+  if (m.qty) v.append(el('div', { class: m.qty.ok ? 'ok' : 'warn' }, `${m.qty.ok ? '✓' : '✗'} 張數：${m.qty.msg}`));
+  for (const x of m.msgs || []) v.append(el('div', { class: 'warn' }, x));
+  v.append(el('div', { class: 'raw' }, '比對的是節目介紹寫的票價表；實際能買的票區、剩餘數量要在購票頁看，選票由你自己點。'));
+}
+
+let matchTimer = 0;
+function matchSoon(ms = 300) {
+  clearTimeout(matchTimer);
+  matchTimer = setTimeout(async () => {
+    if ($('infoBox').hidden) return;
+    const r = await send({ type: 'match-info', prefs: ibonPrefs() });
+    if (r.ok) { renderChecks(r.checks); renderMatch(r.match); }
+  }, ms);
+}
+for (const id of ['ibonAreas', 'ibonQty', 'ibonMaxPrice']) $(id).addEventListener('input', () => matchSoon());
+
+const MODE_TEXT = { auto: '助手會做', manual: '你自己做', never: '不做' };
+function renderPolicy(policy) {
+  const t = $('policyView');
+  t.replaceChildren();
+  for (const p of policy || []) {
+    const tr = el('tr');
+    tr.append(el('td', { class: `m-${p.mode}` }, MODE_TEXT[p.mode] || p.mode), el('td', {}, p.label), el('td', { class: 'raw' }, p.basis));
+    t.append(tr);
+  }
+}
+
+function renderPage(r) {
+  const v = $('pageView');
+  v.replaceChildren();
+  if (!r || !r.state) return;
+  const s = r.state;
+  v.append(el('div', { class: 'title' }, `${s.label}${s.verified ? '' : '（這種頁面的結構還沒在真站核對過）'}`));
+  v.append(el('div', { class: s.login.state === 'logged-out' ? 'warn' : 'hint' }, `登入：${s.login.msg}`));
+  if (s.kind === 'activity') v.append(el('div', { class: 'hint' }, '活動頁的場次狀態請按「讀取活動資訊」'));
+  else if (!s.hints.length) v.append(el('div', { class: 'hint' }, '頁面上沒有看到售完、排隊、驗證碼、錯誤這類字樣'));
+  for (const h of s.hints) v.append(el('div', { class: 'warn' }, `${h.msg}（看到「${h.evidence}」，未驗證）`));
+  v.append(el('div', { class: 'raw' }, '這一頁的點選、張數、下一步、驗證碼、付款都由你自己操作。'));
+}
+
+$('btnPage').addEventListener('click', async () => {
+  const out = $('pageMsg');
+  out.textContent = '讀取中…（只讀，不會點任何按鈕）';
+  out.className = 'hint';
+  const r = await send({ type: 'ibon-page', op: 'state' });
+  out.textContent = r.ok ? '已讀取目前的 ibon 分頁' : (r.error || '讀取失敗');
+  out.className = 'hint ' + (r.ok ? 'good' : 'bad');
+  renderPage(r.ok ? r : null);
+});
+
+/** 結構快照：存成檔案，交給開發者做購票頁的讀取。先數一下有幾個封閉的 Shadow DOM，方便確認有讀進去 */
+$('btnSnapshot').addEventListener('click', async () => {
+  const out = $('pageMsg');
+  out.textContent = '記錄中…（只讀）';
+  out.className = 'hint';
+  const r = await send({ type: 'ibon-page', op: 'snapshot' });
+  if (!r.ok) { out.textContent = r.error || '記錄失敗'; out.className = 'hint bad'; return; }
+  const snap = r.snapshot;
+  let shadows = 0;
+  (function walk(n) { if (!n) return; if (n.t === '#shadow-root') shadows++; for (const k of n.k || []) walk(k); })(snap.tree);
+  const blob = new Blob([JSON.stringify({ version: chrome.runtime.getManifest().version, ...snap }, null, 1)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const now = new Date();
+  const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+  const a = el('a', { href: url, download: `ibon-structure-${snap.kind || 'page'}-${stamp}.json` });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+  out.textContent = `已存成檔案：${snap.nodes} 個節點、${shadows} 個 Shadow DOM${snap.truncated ? '（頁面太大，後面沒記）' : ''}。姓名這類遮不到，交出去之前請打開檔案看過`;
+  out.className = 'hint good';
 });
 
 /* ───────────── 狀態 ───────────── */

@@ -3,13 +3,25 @@
    * 兩種情況都只讀，讀完把整理好的資訊交回去。 */
 
   async function readAndBuild() {
-    const raw = await readIbonActivity(15000);
-    return { ok: true, info: { ...buildEventInfo(raw, Date.now()), warnings: raw.warnings } };
+    if (IbonAdapter.pageKind() !== 'activity') return { ok: false, error: '這一頁不是活動頁' };
+    const raw = await IbonAdapter.readActivity(15000);
+    const login = IbonAdapter.loginState();
+    return { ok: true, info: { ...buildEventInfo(raw, Date.now()), warnings: raw.warnings, login } };
   }
 
+  /* 背景程式要的東西（只接受擴充功能自己送來的）：
+   *   info-read      讀活動頁的資訊
+   *   page-state     這一頁的種類、登入、狀態提示、操作政策
+   *   page-snapshot  結構快照 */
+  const HANDLERS = {
+    'info-read': readAndBuild,
+    'page-state': async () => ({ ok: true, state: IbonAdapter.readState() }),
+    'page-snapshot': async () => ({ ok: true, snapshot: IbonAdapter.snapshot() }),
+  };
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-    if (!msg || msg.type !== 'info-read' || sender.id !== chrome.runtime.id) return false;
-    readAndBuild().then(sendResponse, (e) => sendResponse({ ok: false, error: String((e && e.message) || e) }));
+    const fn = msg && HANDLERS[msg.type];
+    if (!fn || sender.id !== chrome.runtime.id) return false;
+    fn().then(sendResponse, (e) => sendResponse({ ok: false, error: String((e && e.message) || e) }));
     return true;
   });
 

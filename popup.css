@@ -129,3 +129,12 @@ fieldset.profile legend { font-weight: 700; padding: 0 4px; }
 .infoview .warn { color: var(--warn); }
 button:disabled { opacity: .5; cursor: not-allowed; }
 header .ver { font-size: 12px; font-weight: 400; color: var(--muted); }
+.infobox .boxtitle { font-weight: 700; margin-bottom: 4px; }
+.infobox .prefs { margin: 8px 0; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; }
+.infobox .prefs legend { font-weight: 600; padding: 0 4px; }
+.policy { width: 100%; border-collapse: collapse; font-size: 12px; }
+.policy td { padding: 3px 4px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.policy .m-auto { color: var(--ok); font-weight: 600; white-space: nowrap; }
+.policy .m-manual { color: var(--warn); font-weight: 600; white-space: nowrap; }
+.policy .m-never { color: var(--err); font-weight: 600; white-space: nowrap; }
+.infoview .ok { color: var(--ok); }

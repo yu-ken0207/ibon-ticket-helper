@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+<head>
+<meta charset="utf-8">
+<title>[測試用] 購票頁結構樣本</title>
+</head>
+<body>
+<!--
+  端對端測試用的「購票流程頁」樣本：內容全部虛構，結構也是假設的（真站的購票頁還沒看過），不是任何官方網站，也不會被部署。
+  用來測：助手在購票頁只讀（不點任何東西）、狀態提示標「未驗證」、結構快照會遮掉個資而且讀得到封閉的 Shadow DOM。
+  頁首放了假的會員 Email 與手機、欄位裡預先填了字，測試確認快照裡沒有這些內容。
+  任何按鈕被點到就打一個 /__clicked 請求。
+-->
+<p style="background:#fde68a;padding:6px">測試用頁面：結構是假設的，內容是虛構的，不是任何官方網站。</p>
+<div id="member">測試會員 您好｜member@example.com｜0912-345-678</div>
+<h2>選擇票區</h2>
+<div id="areaHost"></div>
+<form id="ticketForm" action="/application/UTK02/UTK0202_000.aspx?SESSION=abc123">
+  <label for="qty">張數</label>
+  <select id="qty" name="qty"><option>0</option><option>1</option><option>2</option><option>3</option><option>4</option></select>
+  <p>請輸入圖形驗證碼</p>
+  <img alt="驗證碼" src="/captcha.png?t=999">
+  <input id="captchaInput" name="captcha" value="ABCD">
+  <button type="button" id="nextBtn">下一步</button>
+</form>
+<script>
+  const root = document.getElementById('areaHost').attachShadow({ mode: 'closed' });
+  root.innerHTML = `<ul class="area-list">
+    <li><span class="name">示範看台區</span> <span class="price">NT$150</span> <span class="status">可購買</span> <button type="button">選擇</button></li>
+    <li><span class="name">示範搖滾區</span> <span class="price">NT$300</span> <span class="status">已售完</span> <button type="button" disabled>已售完</button></li>
+  </ul>`;
+  const clicked = () => { fetch('/__clicked', { method: 'POST' }); };
+  for (const b of root.querySelectorAll('button')) b.addEventListener('click', clicked);
+  document.getElementById('nextBtn').addEventListener('click', clicked);
+</script>
+</body>
+</html>
