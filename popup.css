@@ -138,3 +138,12 @@ header .ver { font-size: 12px; font-weight: 400; color: var(--muted); }
 .policy .m-manual { color: var(--warn); font-weight: 600; white-space: nowrap; }
 .policy .m-never { color: var(--err); font-weight: 600; white-space: nowrap; }
 .infoview .ok { color: var(--ok); }
+fieldset.prefs { margin: 8px 0; padding: 6px 10px 8px; border: 1px solid var(--line); border-radius: 8px; }
+fieldset.prefs legend { font-weight: 700; padding: 0 4px; }
+.task .wfstate { font-size: 12px; color: var(--muted); margin: 2px 0 6px; }
+.task .handoff { margin: 6px 0; padding: 6px 8px; border: 1px solid var(--warn); border-radius: 6px; }
+.task .handoff .next { font-weight: 600; margin-top: 4px; }
+.task .plan { font-size: 12px; margin: 4px 0; }
+.task .plan .v-chosen { color: var(--ok); font-weight: 600; }
+.task .plan .v-skip, .task .plan .v-unknown, .task .plan .v-wait { color: var(--muted); }
+.task details { font-size: 12px; }

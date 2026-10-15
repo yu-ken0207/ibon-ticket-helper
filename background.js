@@ -7,11 +7,15 @@
  *      頁面每次載入都是全新的頁面程式，它靠這裡的狀態知道該倒數、該做下一步，還是什麼都不做。
  *   3. 通知與紀錄：結果用系統通知告訴你，過程寫進 storage 給設定頁顯示。
  *
- * 任務階段（task.phase）：
+ * 流程狀態（task.wf，WorkflowStateStore）：細的購票狀態機見 lib/workflow.js；頁面程式每進一個狀態先報到（wf），
+ * 每個網站操作先問 PolicyGate（gate，lib/policy.js）。交給你時整理成 task.handoff（原因、頁面、已確認的內容、下一步）。
+ *
+ * 任務階段（task.phase，粗的生命週期）：
  *   armed        已排程，等開賣（綁定的分頁在倒數）
  *   fired        開賣時間到，頁面已重新整理，正在選購
  *   running      「立即執行」或你按了「繼續」，正在選購
  *   waiting-user 已經停下來交給你：確認頁（等你自己確認）、排隊、驗證碼、機器人檢查、資料有問題
+ *   paused       你按了暫停：頁面程式不再做新的操作，按「繼續」從目前這一頁接著做
  *   done         結束（你確認後建立了訂單，或失敗）
  *   cancelled    已取消
  *
@@ -29,6 +33,8 @@ import { siteOf, targetUrlOf, siteKey, siteLabel, pageKindOf, infoSiteOf, infoUr
 import { parseTicketLines, cleanProfile, checkProfile, describeProfileProblem } from './lib/flow.js';
 import { sanitizeInfo } from './lib/eventinfo.js';
 import { ibonPageKind, isIbonPage, IBON_PAGE_INFO, IBON_POLICY, validateEventInfo, matchIbonPrefs } from './lib/ibon.js';
+import { STATES, newWorkflow, transition, stateOfResult, composeHandoff } from './lib/workflow.js';
+import { policyDecision } from './lib/policy.js';
 
 const ALARM_OPEN = 'ith-open';
 const ALARM_WATCH = 'ith-watch';
@@ -45,7 +51,7 @@ const DEFAULTS = {
   syncClock: true,
 };
 
-const ACTIVE_PHASES = ['armed', 'fired', 'running', 'waiting-user'];
+const ACTIVE_PHASES = ['armed', 'fired', 'running', 'waiting-user', 'paused'];
 const SUCCESS_PHASES = ['fired', 'running', 'waiting-user'];
 
 const get = (keys) => chrome.storage.local.get(keys);
@@ -91,6 +97,10 @@ function normalizeCfg(raw) {
     failRetryMs: int(r.failRetryMs, DEFAULTS.failRetryMs, 200, 60000),
     failMaxRetries: int(r.failMaxRetries, DEFAULTS.failMaxRetries, 0, 10),
     syncClock: r.syncClock !== false,
+    // 需求（lib/planner.js）：票區偏好一行一組；最高單價、總金額上限選填
+    areas: (Array.isArray(r.areas) ? r.areas : String(r.areas || '').split(/\r?\n/)).map((x) => String(x).replace(/　/g, ' ').trim()).filter(Boolean).slice(0, 10),
+    maxUnitPrice: int(r.maxUnitPrice, 0, 0, 10000000) || null,
+    maxTotal: int(r.maxTotal, 0, 0, 100000000) || null,
   };
   cfg.site = siteOf(cfg.eventUrl);
   cfg.regUrl = targetUrlOf(cfg.eventUrl);
@@ -153,10 +163,40 @@ function newTask(cfg, mode, extra) {
     targetTs: null, openAt: null, tabId: null, windowId: null,
     phase: mode === 'scheduled' ? 'armed' : 'running',
     notOpen: 0, fail: 0, loadFail: 0, loadStreak: 0, loadFailSince: null, rateRetries: 0, createdAt: Date.now(), startedAt: null, firedAt: null, fireDrift: null,
-    result: null, warned: {},
+    result: null, warned: {}, handoff: null,
+    // 排程：等開賣；立即執行：判斷目前頁面
+    wf: transition(newWorkflow(), mode === 'scheduled' ? 'WAITING_FOR_SALE' : 'PAGE_DETECTION', { reason: mode === 'scheduled' ? '排程' : '立即執行' }).wf,
     ...extra,
   };
 }
+
+/** 給頁面程式的流程狀態（不含歷程）：做完的步驟、這次的選擇、試過買不到的票區 */
+const str = (v, n) => (typeof v === 'string' ? v.slice(0, n) : '');
+const num = (v, max) => (Number.isFinite(Number(v)) && v !== null && v !== '' ? Math.max(0, Math.min(max, Math.round(Number(v)))) : null);
+const arr = (v, n) => (Array.isArray(v) ? v.slice(0, n) : []);
+const cleanItems = (v) => arr(v, 10).map((x) => ({ name: str(x && x.name, 30), qty: num(x && x.qty, 99) || 0 }));
+/** 頁面送來的規劃（候選與理由） */
+const cleanPlan = (p) => ({
+  kind: p.kind === 'area' ? 'area' : 'session', result: str(p.result, 20), msg: str(p.msg, 300),
+  ranked: arr(p.ranked, 20).map((x) => ({ id: str(x.id, 40), text: str(x.text || x.name, 80), status: str(x.status, 20), remaining: num(x.remaining, 100000), pref: num(x.pref, 99), verdict: str(x.verdict, 20), reason: str(x.reason, 160) })),
+});
+/** 頁面送來的這次選擇（場次、票區、票種張數、金額） */
+const cleanSelection = (x) => {
+  const o = {};
+  if ('slotId' in x) o.slotId = str(x.slotId, 40) || null;
+  if ('sessionText' in x) o.sessionText = str(x.sessionText, 80) || null;
+  if ('areaId' in x) o.areaId = str(x.areaId, 40) || null;
+  if ('areaName' in x) o.areaName = str(x.areaName, 40) || null;
+  if ('items' in x) o.items = cleanItems(x.items);
+  if ('amount' in x) o.amount = num(x.amount, 100000000);
+  return o;
+};
+/** 頁面讀到的確認頁內容 */
+const cleanSummary = (x) => (x && typeof x === 'object'
+  ? { session: str(x.session, 120), area: str(x.area, 40) || null, items: cleanItems(x.items), amount: num(x.amount, 100000000), holdLeftSec: num(x.holdLeftSec, 86400) }
+  : null);
+
+const publicWf = (wf) => (wf ? { state: wf.state, done: wf.done || {}, selection: wf.selection || null, skipAreas: wf.skipAreas || {} } : null);
 
 async function retireOld() {
   const old = await getTask();
@@ -237,7 +277,7 @@ async function runNow(raw, tabIdHint) {
   await badge('▶', '#0f766e');
   addLog('立即執行');
 
-  if (midFlow) sendCmd(tabId, { cmd: 'run', cfg, since: task.startedAt, skip: [] });
+  if (midFlow) sendCmd(tabId, { cmd: 'run', cfg, since: task.startedAt, skip: [], wf: publicWf(task.wf) });
   else if (sameSiteTab) await chrome.tabs.update(tabId, { url: cfg.regUrl });
   return { ok: true, task: await getTask() };
 }
@@ -247,7 +287,8 @@ async function cancel(reason = '已取消任務') {
   const t = await serial(async () => {
     const task = await getTask();
     if (!task || !ACTIVE_PHASES.includes(task.phase)) return null;
-    const next = { ...task, phase: 'cancelled', result: { ok: false, kind: 'cancelled', msg: reason, at: Date.now() } };
+    const wf = transition(task.wf, 'CANCELLED', { reason, force: true }).wf;
+    const next = { ...task, phase: 'cancelled', wf, handoff: null, result: { ok: false, kind: 'cancelled', msg: reason, at: Date.now() } };
     await set({ task: next });
     return next;
   });
@@ -255,6 +296,26 @@ async function cancel(reason = '已取消任務') {
   await badge('');
   addLog(reason);
   return { ok: true };
+}
+
+/**
+ * 「暫停」：正在選購時（開賣後或立即執行），讓頁面程式做完手上這一個檢查就停，不再做新的操作。
+ * 之後每一步的報到與 PolicyGate 也都會拒絕；按「繼續」從目前這一頁重新判斷接著做。排程等開賣時請用「取消任務」。
+ */
+async function pause() {
+  const t = await serial(async () => {
+    const task = await getTask();
+    if (!task || !['fired', 'running'].includes(task.phase)) return null;
+    const wf = transition(task.wf, 'PAUSED', { reason: '你按了暫停', force: true }).wf;
+    const next = { ...task, phase: 'paused', wf, handoff: composeHandoff('PAUSED', { kind: 'paused', msg: '你按了暫停', wf }) };
+    await set({ task: next });
+    return next;
+  });
+  if (!t) return { ok: false, error: '目前沒有正在選購的任務可以暫停（排程等開賣時請用「取消任務」）' };
+  if (t.tabId) sendCmd(t.tabId, { cmd: 'pause' });
+  await badge('Ⅱ', '#6b7280');
+  addLog('你按了暫停：助手做完手上這一個檢查就停，不再做新的操作');
+  return { ok: true, task: t };
 }
 
 /**
@@ -270,9 +331,11 @@ async function resume(raw) {
   }
   const t = await serial(async () => {
     const task = await getTask();
-    if (!task || task.phase !== 'waiting-user' || !task.tabId) return null;
+    if (!task || !['waiting-user', 'paused'].includes(task.phase) || !task.tabId) return null;
+    if (task.wf && task.wf.state === 'PAYMENT_HANDOFF') return { error: '已經到付款前交接了：請自己按「確認建立訂單」，助手不會接著做' };
     if (cfg && siteKey(cfg.site, cfg.regUrl) !== task.slug) return { error: '設定頁裡的網址跟目前的任務不是同一個站，請按「立即執行」重新開始' };
-    const next = { ...task, cfg: cfg || task.cfg, phase: 'running', result: null };
+    const wf = transition(task.wf, 'PAGE_DETECTION', { reason: task.phase === 'paused' ? '你按了繼續（暫停後）' : '你按了繼續' }).wf;
+    const next = { ...task, cfg: cfg || task.cfg, phase: 'running', result: null, handoff: null, wf };
     await set({ task: next });
     return next;
   });
@@ -283,7 +346,7 @@ async function resume(raw) {
     await chrome.windows.update(tab.windowId, { focused: true });
     await chrome.tabs.update(tab.id, { active: true });
   } catch (_) { /* 分頁可能已關閉 */ }
-  sendCmd(t.tabId, { cmd: 'run', cfg: t.cfg, since: t.startedAt || t.firedAt || Date.now(), skip: t.skip || [] });
+  sendCmd(t.tabId, { cmd: 'run', cfg: t.cfg, since: t.startedAt || t.firedAt || Date.now(), skip: t.skip || [], wf: publicWf(t.wf) });
   await badge('▶', '#0f766e');
   addLog('你按了「繼續」，助手從目前這一頁接著做');
   return { ok: true, task: t };
@@ -389,6 +452,47 @@ async function ibonPage(op) {
   return { ...r, kind };
 }
 
+/* ───────────────────────── 流程報到、PolicyGate ───────────────────────── */
+
+/**
+ * WorkflowEngine：頁面程式進到一個流程狀態前先來報到。被暫停、取消，或轉移不合法（lib/workflow.js）就不准；
+ * 准了就記下狀態、這一步的規劃、選擇與做完的步驟（task.wf），給重新整理、service worker 重啟後接著用。
+ */
+function onWf(tabId, p) {
+  return serial(async () => {
+    const t = await getTask();
+    if (!t || t.tabId !== tabId) return { ok: false, reason: 'no-task', msg: '這個分頁沒有綁定的任務' };
+    if (t.phase === 'paused') return { ok: false, reason: 'paused' };
+    if (!['armed', 'fired', 'running'].includes(t.phase)) return { ok: false, reason: t.phase, msg: '任務已經不在選購中，不再往下做' };
+    const r = transition(t.wf, String(p.state || ''), { reason: str(p.reason, 160) });
+    if (!r.ok) { addLog(`${r.msg}，先停下來`, 'err'); return { ok: false, reason: 'bad-transition', msg: r.msg }; }
+    const wf = { ...r.wf };
+    if (p.plan) wf.plan = { ...(wf.plan || {}), [p.plan.kind === 'area' ? 'area' : 'session']: cleanPlan(p.plan) };
+    if (p.selection) wf.selection = { ...(wf.selection || {}), ...cleanSelection(p.selection) };
+    if ((p.done === 'hold' || p.done === 'buyer') && !(wf.done && wf.done[p.done])) {
+      wf.done = { ...(wf.done || {}), [p.done]: { at: Date.now(), slotId: (wf.selection || {}).slotId || null, areaId: (wf.selection || {}).areaId || null } };
+    }
+    if (p.clearDone) wf.done = {};
+    if (!r.same || p.plan || p.selection || p.done || p.clearDone) await set({ task: { ...t, wf } });
+    return { ok: true, wf: publicWf(wf) };
+  });
+}
+
+/**
+ * PolicyGate：頁面程式每個網站操作之前來問（lib/policy.js）。被暫停、任務不在選購中一律拒絕；
+ * 只有 ALLOWED 會被執行，其他結果寫進紀錄。
+ */
+async function onGate(tabId, p) {
+  const t = await getTask();
+  const action = str(p && p.action, 40);
+  if (!t || t.tabId !== tabId) return { decision: 'BLOCKED', reason: '這個分頁沒有綁定的任務', label: action };
+  if (t.phase === 'paused') return { decision: 'BLOCKED', reason: '已暫停', label: action, paused: true };
+  if (!['fired', 'running'].includes(t.phase)) return { decision: 'BLOCKED', reason: '任務不在選購中，不做網站操作', label: action };
+  const d = policyDecision(t.site, action, { cfg: t.cfg });
+  if (d.decision !== 'ALLOWED') addLog(`操作政策：${d.label} → ${d.decision}（${d.reason}）`, 'warn');
+  return d;
+}
+
 /* ───────────────────────── 頁面報到 ───────────────────────── */
 
 /**
@@ -415,11 +519,13 @@ function onHello(tabId, page) {
       }
     }
     if (!sameSite) return { mode: 'idle' };
+    if (t.phase === 'paused') return { mode: 'paused' };
     if (kind === 'done') {
       if (!SUCCESS_PHASES.includes(t.phase)) return { mode: 'idle' };
       const since = t.firedAt || t.startedAt;
       const result = { ok: true, kind: 'ordered', msg: '訂單已建立（由你確認）', url: page.url, at: Date.now(), elapsedMs: since ? Date.now() - since : null };
-      await set({ task: { ...t, phase: 'done', result } });
+      const wf = transition(t.wf, 'COMPLETED', { reason: '你確認後網站建立了訂單', force: true }).wf;
+      await set({ task: { ...t, phase: 'done', result, wf, handoff: null } });
       return { mode: 'success', since, finalize: true };
     }
     if (t.phase === 'waiting-user') {
@@ -428,11 +534,11 @@ function onHello(tabId, page) {
     if (t.mode === 'scheduled' && t.phase === 'armed') {
       if (kind === 'list') return { mode: 'countdown', targetTs: t.targetTs, cfg: t.cfg };
       // 開賣前就被帶到排隊頁：一樣停下來交給你（頁面程式會回報），不在背景等它排完再自己接著做
-      if (kind === 'queue') return { mode: 'run', cfg: t.cfg, since: Date.now(), skip: t.skip || [] };
+      if (kind === 'queue') return { mode: 'run', cfg: t.cfg, since: Date.now(), skip: t.skip || [], wf: publicWf(t.wf) };
       return { mode: 'idle' };
     }
     if (t.phase === 'fired' || t.phase === 'running') {
-      return { mode: 'run', cfg: t.cfg, since: t.firedAt || t.startedAt, skip: t.skip || [], loadFail: t.loadStreak || 0 };
+      return { mode: 'run', cfg: t.cfg, since: t.firedAt || t.startedAt, skip: t.skip || [], loadFail: t.loadStreak || 0, wf: publicWf(t.wf) };
     }
     return { mode: 'idle' };
   });
@@ -514,14 +620,20 @@ async function onResult(tabId, r) {
   const t = await serial(async () => {
     const task = await getTask();
     if (!task || task.tabId !== tabId || !ACTIVE_PHASES.includes(task.phase)) return null;
+    if (task.phase === 'paused') return { paused: true };   // 暫停中：頁面回報的結果不改狀態，按「繼續」會重新判斷這一頁
     const since = task.firedAt || task.startedAt;
     const result = { ok: !!r.ok, kind: r.kind || '', msg: r.msg || '', url: r.url || '', at: Date.now(), elapsedMs: since ? Date.now() - since : null };
     const phase = r.handOff ? 'waiting-user' : 'done';
-    const next = { ...task, phase, result };
+    // 流程狀態照結果轉（交給你、付款前交接、失敗）；交接內容給設定頁顯示（HandoffManager）
+    const st = stateOfResult({ ok: !!r.ok, kind: r.kind, handOff: !!r.handOff });
+    const wf = transition(task.wf, st, { reason: String(r.msg || r.kind || '').slice(0, 160), force: true }).wf;
+    const handoff = composeHandoff(st, { kind: r.kind, msg: r.msg, page: { kind: str(r.pageKind, 20), url: str(r.url, 300) }, wf, summary: cleanSummary(r.summary) });
+    const next = { ...task, phase, result, wf, handoff };
     await set({ task: next });
     return next;
   });
   if (!t) return { ok: false };
+  if (t.paused) { addLog(`暫停中，頁面回報的結果先不處理：${r.msg || r.kind || ''}`); return { ok: false, paused: true }; }
   const r2 = t.result;
   const label = siteLabel(t.site);
   if (r2.ok) {
@@ -614,10 +726,10 @@ chrome.tabs.onUpdated.addListener((tabId, info) => {
 
 /* ───────────────────────── 訊息入口 ───────────────────────── */
 
-const POPUP_TYPES = new Set(['schedule', 'run-now', 'resume', 'cancel', 'status', 'clear-logs', 'preview-url', 'check-slots', 'health-check', 'read-info', 'match-info', 'ibon-page']);
+const POPUP_TYPES = new Set(['schedule', 'run-now', 'resume', 'pause', 'cancel', 'status', 'clear-logs', 'preview-url', 'check-slots', 'health-check', 'read-info', 'match-info', 'ibon-page']);
 // ibon 的頁面（活動頁、購票頁）只能送這兩種
 const INFO_PAGE_TYPES = new Set(['info-hello', 'info-result']);
-const PAGE_TYPES = new Set(['hello', 'fired', 'fired-drift', 'retry', 'result', 'log', 'warn', 'abort-request', 'check-result', 'load-ok', 'clock', 'health-result', 'blackbox', 'skip-slot', 'rate-seen']);
+const PAGE_TYPES = new Set(['hello', 'fired', 'fired-drift', 'retry', 'result', 'log', 'warn', 'abort-request', 'check-result', 'load-ok', 'clock', 'health-result', 'blackbox', 'skip-slot', 'rate-seen', 'wf', 'gate', 'skip-area']);
 
 async function handle(msg, sender) {
   const type = msg && msg.type;
@@ -698,6 +810,19 @@ async function handle(msg, sender) {
         });
         return { ok: true };
       }
+      case 'wf': return onWf(tabId, p);
+      case 'gate': return onGate(tabId, p);
+      case 'skip-area': {
+        // 選了票區送出卻售完：記下來，同一個場次改選下一個票區
+        await serial(async () => {
+          const t = await getTask();
+          if (!t || t.tabId !== tabId || !p.slotId || !p.areaId) return;
+          const skipAreas = { ...((t.wf && t.wf.skipAreas) || {}) };
+          skipAreas[str(p.slotId, 40)] = [...new Set([...(skipAreas[p.slotId] || []), str(p.areaId, 40)])].slice(0, 20);
+          await set({ task: { ...t, wf: { ...t.wf, skipAreas } } });
+        });
+        return { ok: true };
+      }
       case 'rate-seen': {
         // 頁面看到錯誤時問：剛剛的回應是不是 429？網站的錯誤訊息不一定寫狀態碼，回應標頭才準。
         // 頁面可能比 webRequest 早一步看到錯誤，第一次沒看到就再等一下
@@ -746,6 +871,7 @@ async function handle(msg, sender) {
     case 'schedule': return schedule(msg.cfg);
     case 'run-now': return runNow(msg.cfg, msg.tabId);
     case 'resume': return resume(msg.cfg);
+    case 'pause': return pause();
     case 'check-slots': return openCheck('check', msg.cfg);
     case 'health-check': return openCheck('health', msg.cfg);
     case 'read-info': return readInfo(msg.url, msg.prefs);
@@ -767,7 +893,7 @@ async function handle(msg, sender) {
     }
     case 'status': {
       const { task = null, logs = [] } = await get(['task', 'logs']);
-      return { ok: true, task, logs: logs.slice(-80), now: Date.now() };
+      return { ok: true, task, logs: logs.slice(-80), now: Date.now(), labels: Object.fromEntries(Object.entries(STATES).map(([k, v]) => [k, v.label])) };
     }
     default: return { ok: false };
   }

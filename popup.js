@@ -7,6 +7,7 @@ const PHASE = {
   fired: '開賣了，正在選購',
   running: '正在選購',
   'waiting-user': '停下來等你',
+  paused: '已暫停',
   done: '已結束',
   cancelled: '已取消',
 };
@@ -45,7 +46,7 @@ function say(text, cls = '') {
 
 /* ───────────── 表單 ───────────── */
 
-const TEXT_FIELDS = ['eventUrl', 'keywords', 'tickets', 'openTime', 'preOpenSec', 'notOpenRetryMs', 'notOpenMaxRetries', 'failMaxRetries', 'ibonAreas', 'ibonQty', 'ibonMaxPrice'];
+const TEXT_FIELDS = ['eventUrl', 'keywords', 'tickets', 'areas', 'maxUnitPrice', 'maxTotal', 'openTime', 'preOpenSec', 'notOpenRetryMs', 'notOpenMaxRetries', 'failMaxRetries'];
 const PROFILE_FIELDS = [['profileName', 'name'], ['profilePhone', 'phone'], ['profileEmail', 'email'], ['profileNote', 'note']];
 
 function readForm() {
@@ -63,9 +64,9 @@ function readForm() {
     failMaxRetries: v('failMaxRetries'),
     syncClock: $('syncClock').checked,
     fallback: $('fallback').checked,
-    ibonAreas: v('ibonAreas'),
-    ibonQty: v('ibonQty'),
-    ibonMaxPrice: v('ibonMaxPrice'),
+    areas: v('areas'),
+    maxUnitPrice: v('maxUnitPrice'),
+    maxTotal: v('maxTotal'),
   };
   if (cfg.openTime) {
     const t = new Date(cfg.openTime).getTime();   // datetime-local 沒有時區，照本機時間解讀
@@ -205,7 +206,9 @@ $('btnInfo').addEventListener('click', async () => {
 
 /* ───────────── ibon：需求比對、資料檢查、目前分頁、操作政策（都只讀） ───────────── */
 
-const ibonPrefs = () => ({ areas: $('ibonAreas').value, qty: $('ibonQty').value, maxPrice: $('ibonMaxPrice').value });
+/** ibon 的比對也用「我的需求」：票區偏好、票種張數的合計、最高單價 */
+const totalQty = () => $('tickets').value.split(/\r?\n/).reduce((a, line) => { const m = line.match(/(\d+)\s*張?\s*$/); return a + (m ? Number(m[1]) : 0); }, 0);
+const ibonPrefs = () => ({ areas: $('areas').value, qty: totalQty() ? String(totalQty()) : '', maxPrice: $('maxUnitPrice').value });
 
 function renderChecks(checks) {
   const v = $('checkView');
@@ -234,7 +237,7 @@ function matchSoon(ms = 300) {
     if (r.ok) { renderChecks(r.checks); renderMatch(r.match); }
   }, ms);
 }
-for (const id of ['ibonAreas', 'ibonQty', 'ibonMaxPrice']) $(id).addEventListener('input', () => matchSoon());
+for (const id of ['areas', 'tickets', 'maxUnitPrice']) $(id).addEventListener('input', () => matchSoon());
 
 const MODE_TEXT = { auto: '助手會做', manual: '你自己做', never: '不做' };
 function renderPolicy(policy) {
@@ -302,7 +305,7 @@ function el(tag, attrs = {}, text) {
   return e;
 }
 
-function renderTask(task, now) {
+function renderTask(task, now, labels = {}) {
   const box = $('taskBox');
   box.replaceChildren();
   if (!task) { box.textContent = '沒有任務'; return; }
@@ -310,6 +313,9 @@ function renderTask(task, now) {
   const phaseCls = task.phase === 'done' ? (task.result && task.result.ok ? 'ok' : 'err')
     : task.phase === 'waiting-user' ? 'warn' : task.phase === 'cancelled' ? 'err' : '';
   box.append(el('div', { class: 'phase ' + phaseCls }, PHASE[task.phase] || task.phase));
+  const wf = task.wf || null;
+  if (wf) box.append(el('div', { class: 'wfstate' }, `流程：${labels[wf.state] || wf.state}`));
+  if (task.handoff) box.append(renderHandoff(task.handoff));
 
   const dl = el('dl');
   const row = (k, v) => { dl.append(el('dt', {}, k), el('dd', {}, v)); };
@@ -329,6 +335,43 @@ function renderTask(task, now) {
     dl.lastChild.append(el('span', { class: task.result.ok ? 'ok' : (task.phase === 'waiting-user' ? 'warn' : 'err') }, task.result.msg + took));
   }
   box.append(dl);
+  if (wf && wf.plan) for (const k of ['session', 'area']) if (wf.plan[k]) box.append(renderPlan(wf.plan[k]));
+  if (wf && wf.history && wf.history.length) {
+    const d = el('details');
+    d.append(el('summary', {}, `流程紀錄（${wf.history.length}）`));
+    const ol = el('ol', { class: 'logs' });
+    for (const h of wf.history.slice(-15)) ol.append(el('li', {}, `${clock(h.at)} ${labels[h.from] || h.from} → ${labels[h.to] || h.to}${h.forced ? '（照回報的結果）' : ''}${h.reason ? `：${h.reason}` : ''}`));
+    d.append(ol);
+    box.append(d);
+  }
+}
+
+/** 交接內容（HandoffManager）：為什麼停、停在哪、已確認的內容、你要做的下一步 */
+function renderHandoff(h) {
+  const box = el('div', { class: 'handoff' });
+  box.append(el('div', { class: 'title' }, h.label));
+  if (h.reason) box.append(el('div', {}, `原因：${h.reason}`));
+  const c = h.confirmed || {};
+  const parts = [];
+  if (c.session) parts.push(`場次 ${c.session}`);
+  if (c.area) parts.push(`票區 ${c.area}`);
+  if (c.items && c.items.length) parts.push(c.items.map((x) => `${x.name} ${x.qty} 張`).join('、'));
+  if (c.amount != null) parts.push(`合計 NT$${c.amount}`);
+  if (c.holdLeftSec != null) parts.push(`保留約剩 ${c.holdLeftSec} 秒`);
+  if (parts.length) box.append(el('div', {}, `已確認：${parts.join('，')}`));
+  if (h.next) box.append(el('div', { class: 'next' }, `下一步：${h.next}`));
+  return box;
+}
+
+/** 規劃（PurchasePlanner）的候選與理由 */
+const VERDICT = { chosen: '✓ 選這個', skip: '✗', unknown: '？', wait: '…', ok: '○' };
+function renderPlan(p) {
+  const box = el('div', { class: 'plan' });
+  box.append(el('div', {}, `${p.kind === 'area' ? '票區' : '場次'}規劃：${p.msg || ''}`));
+  const ul = el('ul');
+  for (const r of (p.ranked || []).slice(0, 6)) ul.append(el('li', { class: `v-${r.verdict}` }, `${VERDICT[r.verdict] || r.verdict} ${r.text}：${r.reason}`));
+  box.append(ul);
+  return box;
 }
 
 function renderLogs(logs) {
@@ -347,8 +390,9 @@ async function refresh() {
   if (!r.ok) return;
   // 停下來交給你（不是確認頁）時才顯示「繼續」：確認頁一定由你自己按確認
   const t = r.task;
-  $('btnResume').hidden = !(t && t.phase === 'waiting-user' && !(t.result && t.result.kind === 'ready'));
-  renderTask(r.task, r.now || Date.now());
+  $('btnResume').hidden = !(t && ((t.phase === 'waiting-user' && !(t.result && t.result.kind === 'ready')) || t.phase === 'paused'));
+  $('btnPause').hidden = !(t && ['fired', 'running'].includes(t.phase));
+  renderTask(r.task, r.now || Date.now(), r.labels || {});
   renderLogs(r.logs || []);
 }
 
@@ -368,6 +412,12 @@ $('btnRunNow').addEventListener('click', async () => {
   const r = await send({ type: 'run-now', cfg: readForm() });
   if (r.ok) say('已開始執行，請看網站的分頁', 'ok');
   else say(r.error || '執行失敗', 'err');
+  refresh();
+});
+
+$('btnPause').addEventListener('click', async () => {
+  const r = await send({ type: 'pause' });
+  say(r.ok ? '已暫停：助手做完手上這一個檢查就停。按「繼續」從目前這一頁接著做' : (r.error || '沒辦法暫停'), r.ok ? 'ok' : 'err');
   refresh();
 });
 

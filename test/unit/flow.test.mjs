@@ -93,6 +93,8 @@ test('網站錯誤的處理方式', () => {
   assert.equal(classifyError('', 429), 'rate-limit');
   assert.equal(classifyError('TRANSIENT', 429), 'rate-limit');
   assert.equal(classifyError('', 500), 'retry');
+  assert.equal(classifyError('LOGIN_REQUIRED'), 'login');
+  assert.equal(classifyError('', 401), 'login');
   assert.equal(classifyError('QUEUE_REQUIRED'), 'gate');
   assert.equal(classifyError('CAPTCHA_WRONG'), 'gate');
   assert.equal(classifyError('BOTCHECK_REQUIRED'), 'gate');

@@ -10,6 +10,7 @@
       case 'health': return runHealth(d);
       case 'success': return showSuccess(d);
       case 'confirm-wait': panel(); return onConfirm(d, true);   // 已經交給你了：重新整理確認頁時繼續提醒保留時間
+      case 'paused': panel(); setStatus('已暫停：到擴充功能按「繼續」，從這一頁接著做', 'warn'); return undefined;
       default: return undefined;
     }
   }

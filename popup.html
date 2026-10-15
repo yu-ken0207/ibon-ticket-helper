@@ -26,18 +26,10 @@
     <div id="infoView" class="infoview"></div>
     <div id="checkView" class="infoview"></div>
 
-    <fieldset class="prefs">
-      <legend>我的需求（只比對，不會替你選）</legend>
-      <label class="field">票區偏好
-        <textarea id="ibonAreas" rows="2" placeholder="VIP&#10;A區" spellcheck="false"></textarea>
-      </label>
-      <p class="hint">一行一個，越上面越優先；同一行用空格隔開的字都要對到。名稱照網站上的寫法。</p>
-      <div class="row">
-        <label class="field">張數<input id="ibonQty" type="number" min="1" max="10" placeholder="2"></label>
-        <label class="field">最高單價（選填）<input id="ibonMaxPrice" type="number" min="1" placeholder="6000"></label>
-      </div>
+    <div class="prefs">
+      <div class="boxtitle">跟下面「我的需求」比對（只比對，不會替你選）</div>
       <div id="matchView" class="infoview"></div>
-    </fieldset>
+    </div>
 
     <div class="checkrow">
       <button id="btnPage" class="small" type="button">讀取目前的 ibon 分頁</button>
@@ -53,15 +45,25 @@
     </details>
   </section>
 
-  <label class="field">時段關鍵字
-    <textarea id="keywords" rows="3" placeholder="11/20 06:00" spellcheck="false"></textarea>
-  </label>
-  <p class="hint">一行一組，越上面越優先。同一行用空格隔開，每一段都要出現在時段文字裡，例如「11/20 08:00」。只寫一個時間代表開始時間。</p>
-
-  <label class="field">票種與張數
-    <textarea id="tickets" rows="3" placeholder="全票 2&#10;兒童票 1" spellcheck="false"></textarea>
-  </label>
-  <p class="hint">一行一筆：票種名稱加張數，例如「全票 2」。名稱照網站上的寫法。</p>
+  <fieldset class="prefs">
+    <legend>我的需求</legend>
+    <label class="field">時段關鍵字
+      <textarea id="keywords" rows="3" placeholder="11/20 06:00" spellcheck="false"></textarea>
+    </label>
+    <p class="hint">一行一組，越上面越優先。同一行用空格隔開，每一段都要出現在時段文字裡，例如「11/20 08:00」。只寫一個時間代表開始時間。</p>
+    <label class="field">票種與張數
+      <textarea id="tickets" rows="3" placeholder="全票 2&#10;兒童票 1" spellcheck="false"></textarea>
+    </label>
+    <p class="hint">一行一筆：票種名稱加張數，例如「全票 2」。名稱照網站上的寫法。</p>
+    <label class="field">票區偏好（選填）
+      <textarea id="areas" rows="2" placeholder="室內池&#10;戶外池" spellcheck="false"></textarea>
+    </label>
+    <p class="hint">有分區的網站才用：一行一組，越上面越優先，同一行用空格隔開的字都要對到。沒填就照頁面順序選第一個符合的。</p>
+    <div class="row">
+      <label class="field">最高單價（選填）<input id="maxUnitPrice" type="number" min="1" placeholder="不限"></label>
+      <label class="field">總金額上限（選填）<input id="maxTotal" type="number" min="1" placeholder="不限"></label>
+    </div>
+  </fieldset>
 
   <fieldset class="profile">
     <legend>購票人資料</legend>
@@ -118,6 +120,7 @@
   <div class="buttons">
     <button id="btnSchedule" class="primary" type="button">排程</button>
     <button id="btnRunNow" type="button">立即執行</button>
+    <button id="btnPause" type="button" hidden title="做完手上這一個檢查就停，不再做新的操作；按「繼續」從目前這一頁接著做">暫停</button>
     <button id="btnResume" type="button" hidden title="遇到排隊、驗證碼或資料有問題時助手會停下來；你處理好之後按這裡，讓它從目前這一頁接著做">繼續</button>
     <button id="btnCancel" class="danger" type="button">取消任務</button>
   </div>

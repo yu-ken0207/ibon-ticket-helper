@@ -116,6 +116,29 @@
       });
     },
 
+    /**
+     * 票區（分區域時才有）：標題寫「區域」的那一組選項 → [{ id, name, surcharge, remaining, soldOut, el }]；沒有就空陣列。
+     * 名稱、加價、剩幾張都從選項的標籤文字讀（例如「戶外池　每張加 NT$30　剩 30 張」），售完的選項會停用。
+     */
+    areas() {
+      const group = deepAll('fieldset').find((f) => /區域/.test(textOf(f.querySelector('legend'))));
+      if (!group) return [];
+      return [...group.querySelectorAll('input[type="radio"]')].map((r) => {
+        const t = textOf(r.labels && r.labels[0]);
+        const add = t.match(/加\s*NT\$\s*([\d,]+)/);
+        const left = t.match(/剩\s*(\d+)\s*張/);
+        const soldOut = r.disabled || /已售完|售完/.test(t);
+        return { id: r.value, name: t.split(/\s+/)[0], surcharge: add ? Number(add[1].replace(/,/g, '')) : 0, remaining: left ? Number(left[1]) : (soldOut ? 0 : null), soldOut, el: r };
+      });
+    },
+
+    /** 選票區：點那個選項，回傳有沒有選到 */
+    chooseArea(area) {
+      if (!area || !area.el || area.el.disabled) return false;
+      if (!area.el.checked) area.el.click();
+      return area.el.checked;
+    },
+
     maxPerOrder() {
       const vals = $$('select[name^="qty_"] option').map((o) => Number(o.value)).filter(Number.isFinite);
       return vals.length ? Math.max(...vals) : Infinity;
@@ -197,6 +220,22 @@
     confirmButton: () => buttonByText('確認建立訂單'),
 
     summary: () => textOf($('main')).slice(0, 300),
+
+    /** 確認頁的訂單內容：場次、票區、票種張數、合計、保留剩幾秒（給 ORDER_REVIEW 核對） */
+    orderSummary() {
+      const main = $('main') || document.body;
+      const line = (re) => { const p = byText('p', re, main)[0]; return p ? textOf(p) : ''; };
+      const items = byText('li', /×\s*\d+/, main).map((li) => {
+        const m = textOf(li).match(/^(.+?)\s*×\s*(\d+)/);
+        return m ? { name: m[1].trim(), qty: Number(m[2]) } : null;
+      }).filter(Boolean);
+      const total = line(/^合計/).match(/NT\$\s*([\d,]+)/);
+      return {
+        session: line(/^入場時段：/).replace(/^入場時段：/, ''),
+        area: line(/^區域：/).replace(/^區域：/, '') || null,
+        items, amount: total ? Number(total[1].replace(/,/g, '')) : null, holdLeftSec: POOL.holdLeft(),
+      };
+    },
 
     /* ── 完成頁、錯誤頁 ── */
 

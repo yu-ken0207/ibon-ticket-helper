@@ -123,6 +123,9 @@ async function fillPopup(popup, o = {}) {
   await popup.fill('#eventUrl', o.url || `${BASE}/pool/`);
   await popup.fill('#keywords', (o.keywords || ['11/20 06:00']).join('\n'));
   await popup.fill('#tickets', (o.tickets || ['全票 2', '兒童票 1']).join('\n'));
+  await popup.fill('#areas', (o.areas || []).join('\n'));
+  await popup.fill('#maxUnitPrice', o.maxUnitPrice ? String(o.maxUnitPrice) : '');
+  await popup.fill('#maxTotal', o.maxTotal ? String(o.maxTotal) : '');
   const pf = { ...PROFILE, ...(o.profile || {}) };
   await popup.fill('#profileName', pf.name);
   await popup.fill('#profilePhone', pf.phone);
@@ -154,6 +157,21 @@ async function waitTask(popup, pred, timeoutMs) {
   return s;
 }
 const ready = (t) => t.phase === 'waiting-user' && t.result && t.result.kind === 'ready';
+/** 流程狀態走過的路（每次轉移的目的狀態），以及有沒有照順序經過 want 這幾個狀態 */
+const wfPath = (t) => ((t && t.wf && t.wf.history) || []).map((h) => h.to);
+const inOrder = (path, want) => { let i = 0; for (const x of path) if (x === want[i]) i++; return i === want.length; };
+const wfState = (t) => (t && t.wf ? t.wf.state : 'none');
+
+/** 用 CDP 關掉擴充功能的 service worker（模擬 Chrome 把閒置的背景程式收掉）；之後的訊息會叫醒一個新的 */
+async function restartServiceWorker(ctx, popup, extId) {
+  const cdp = await ctx.newCDPSession(popup);
+  const { targetInfos } = await cdp.send('Target.getTargets');
+  const t = targetInfos.find((x) => x.type === 'service_worker' && x.url.includes(extId));
+  if (!t) return false;
+  await cdp.send('Target.closeTarget', { targetId: t.targetId });
+  await cdp.detach().catch(() => {});
+  return true;
+}
 const stopped = (t) => ['done', 'waiting-user', 'cancelled'].includes(t.phase);
 const sitePage = (ctx) => ctx.pages().find((p) => p.url().startsWith(`${BASE}/pool/`)) || null;
 /** 伺服器記下的請求時間 → 相鄰兩次的間隔（毫秒） */
@@ -192,12 +210,17 @@ const SCENARIOS = [
         ['網站停在確認步驟', st.pool.step === 'CONFIRM' && page && /\/pool\/confirm$/.test(page.url()), `${st.pool.step} ${page && page.url()}`],
         ['標出「確認建立訂單」按鈕', /3px/.test(outlined), outlined],
         ...noDuplicates(st),
+        ['流程狀態照順序走到付款前交接，沒有硬轉', s.task.wf.state === 'PAYMENT_HANDOFF' && inOrder(wfPath(s.task), ['PAGE_DETECTION', 'ACTIVITY_READ', 'REQUIREMENT_CHECK', 'SESSION_SELECTION', 'PAGE_DETECTION', 'TICKET_AREA_SELECTION', 'QUANTITY_SELECTION', 'PAGE_DETECTION', 'BUYER_INFO', 'PAGE_DETECTION', 'ORDER_REVIEW', 'PAYMENT_HANDOFF']) && !s.task.wf.history.some((h) => h.forced), wfPath(s.task).join('→')],
+        ['記下做完的步驟：已保留、已送出資料', !!(s.task.wf.done.hold && s.task.wf.done.buyer), JSON.stringify(Object.keys(s.task.wf.done))],
+        ['場次規劃寫明選了哪個與理由', !!(s.task.wf.plan && s.task.wf.plan.session && s.task.wf.plan.session.ranked.some((r) => r.verdict === 'chosen' && /可以買/.test(r.reason))), s.task.wf.plan && s.task.wf.plan.session && s.task.wf.plan.session.msg],
+        ['交接內容：已確認的場次、票種張數、金額，下一步由你按確認', s.task.handoff && s.task.handoff.confirmed.session === '11/20（五） 06:00–08:00' && s.task.handoff.confirmed.amount === 280 && s.task.handoff.confirmed.items.length === 2 && /自己按「確認建立訂單」/.test(s.task.handoff.next), JSON.stringify(s.task.handoff && s.task.handoff.confirmed)],
       ];
       // 使用者自己按確認
       await confirmBtn.click();
       const s2 = await waitTask(popup, (t) => t.phase === 'done', 15000);
       const st2 = await siteState(ctx);
       checks.push(['使用者確認後記成成功', s2.task.result && s2.task.result.ok && s2.task.result.kind === 'ordered', resultMsg(s2)]);
+      checks.push(['流程狀態：完成', s2.task.wf.state === 'COMPLETED', wfState(s2.task)]);
       checks.push(...noDuplicates(st2, { confirm: 1 }));
       return checks;
     },
@@ -435,6 +458,248 @@ const SCENARIOS = [
     },
   },
   {
+    name: 'area-fallback',
+    title: '分區域：偏好的票區售完，改選下一個符合條件的票區；確認頁核對後付款前交接',
+    async run({ ctx, popup }) {
+      await scenario(ctx, 'area-sold-out');
+      await fillPopup(popup, { areas: ['室內池', '戶外池'] });
+      await clickAndRead(popup, '#btnRunNow');
+      const s = await waitTask(popup, ready, 40000);
+      const st = await siteState(ctx);
+      const plan = s.task.wf && s.task.wf.plan && s.task.wf.plan.area;
+      const h = s.task.handoff || {};
+      return [
+        ['付款前交接', ready(s.task) && wfState(s.task) === 'PAYMENT_HANDOFF', resultMsg(s)],
+        ['改選戶外池', st.pool.hold && st.pool.hold.areaId === 'outdoor', st.pool.hold && st.pool.hold.areaId],
+        ['票區規劃寫明理由：室內池已售完、選戶外池', !!plan && plan.ranked.some((r) => r.id === 'indoor' && r.verdict === 'skip' && /已售完/.test(r.reason)) && plan.ranked.some((r) => r.id === 'outdoor' && r.verdict === 'chosen'), plan && plan.msg],
+        ['金額含票區加價', st.pool.hold && st.pool.hold.amount === (110 + 30) * 2 + (60 + 30), st.pool.hold && String(st.pool.hold.amount)],
+        ['交接內容有票區與金額（確認頁核對過）', !!h.confirmed && h.confirmed.area === '戶外池' && h.confirmed.amount === 370, JSON.stringify(h.confirmed)],
+        ['只送出一次選購', st.stats.holdRequests === 1, `選購請求 ${st.stats.holdRequests}`],
+        ...noDuplicates(st),
+      ];
+    },
+  },
+  {
+    name: 'area-budget',
+    title: '分區域：偏好的票區超過最高單價，改選下一個在預算內的票區',
+    async run({ ctx, popup }) {
+      await scenario(ctx, 'areas');
+      await fillPopup(popup, { areas: ['親子池', '戶外池'], tickets: ['全票 1'], maxUnitPrice: 150 });
+      await clickAndRead(popup, '#btnRunNow');
+      const s = await waitTask(popup, ready, 40000);
+      const st = await siteState(ctx);
+      const plan = s.task.wf && s.task.wf.plan && s.task.wf.plan.area;
+      return [
+        ['付款前交接', ready(s.task), resultMsg(s)],
+        ['選戶外池（每張 140，在 150 以內）', st.pool.hold && st.pool.hold.areaId === 'outdoor' && st.pool.hold.amount === 140, st.pool.hold && `${st.pool.hold.areaId} ${st.pool.hold.amount}`],
+        ['親子池因為超過最高單價跳過', !!plan && plan.ranked.some((r) => r.id === 'family' && r.verdict === 'skip' && /超過你設定的最高單價 NT\$150/.test(r.reason)), plan && JSON.stringify(plan.ranked)],
+        ...noDuplicates(st),
+      ];
+    },
+  },
+  {
+    name: 'budget-none',
+    once: true,
+    title: '沒有符合預算的選擇：選購前就停下來說明，不送出任何選購',
+    async run({ ctx, popup }) {
+      await scenario(ctx, 'normal');
+      await fillPopup(popup, { maxUnitPrice: 100 });
+      await clickAndRead(popup, '#btnRunNow');
+      const s = await waitTask(popup, stopped, 30000);
+      const st = await siteState(ctx);
+      return [
+        ['停下來，說明哪個票種超過預算', s.task.result.kind === 'budget' && /全票每張 NT\$110超過你設定的最高單價 NT\$100/.test(s.task.result.msg), resultMsg(s)],
+        ['流程狀態：沒有完成；下一步請你調整', wfState(s.task) === 'FAILED' && /調整最高單價/.test((s.task.handoff || {}).next || ''), `${wfState(s.task)}｜${(s.task.handoff || {}).next}`],
+        ['沒有送出選購', st.stats.holdRequests === 0, `選購請求 ${st.stats.holdRequests}`],
+        ...noDuplicates(st),
+      ];
+    },
+  },
+  {
+    name: 'status-unknown',
+    once: true,
+    title: '偏好的場次狀態看不出來：不猜、不當成還沒開放一直重看，停下來請你確認',
+    async run({ ctx, popup }) {
+      await scenario(ctx, 'unknown-status');
+      await fillPopup(popup, { keywords: ['11/20 06:00', '11/20 14:00'] });
+      await clickAndRead(popup, '#btnRunNow');
+      const s = await waitTask(popup, stopped, 30000);
+      await sleep(2500);
+      const st = await siteState(ctx);
+      return [
+        ['停下來請你確認', s.task.phase === 'waiting-user' && s.task.result.kind === 'status-unknown' && wfState(s.task) === 'MANUAL_CONFIRMATION', resultMsg(s)],
+        ['訊息說明是哪個場次看不出來', /11\/20（五） 06:00–08:00.*看不出能不能買/.test(s.task.result.msg), ''],
+        ['沒有一直重看、沒有選購', st.stats.slotsRequests === 1 && (s.task.notOpen || 0) === 0 && st.stats.holdRequests === 0, `讀取 ${st.stats.slotsRequests}、重看 ${s.task.notOpen || 0}、選購 ${st.stats.holdRequests}`],
+        ...noDuplicates(st),
+      ];
+    },
+  },
+  {
+    name: 'login-expired',
+    once: true,
+    title: '登入逾時：停下來請你重新登入；按「繼續」後接著做到付款前交接',
+    async run({ ctx, popup }) {
+      await scenario(ctx, 'login-expired');
+      await fillPopup(popup);
+      await clickAndRead(popup, '#btnRunNow');
+      const s = await waitTask(popup, stopped, 30000);
+      const h = s.task.handoff || {};
+      const first = { kind: s.task.result.kind, state: wfState(s.task), next: h.next };
+      const r = await clickAndRead(popup, '#btnResume');
+      const s2 = await waitTask(popup, ready, 40000);
+      const st = await siteState(ctx);
+      return [
+        ['停下來請你重新登入', first.kind === 'login-required' && first.state === 'MANUAL_CONFIRMATION' && /重新登入/.test(first.next || ''), JSON.stringify(first)],
+        ['按「繼續」後接著做', /已繼續/.test(r) && ready(s2.task), resultMsg(s2)],
+        ['選購一共 2 次：被拒 1 次、成功 1 次', st.stats.holdRequests === 2 && st.stats.holds === 1, `請求 ${st.stats.holdRequests}、成功 ${st.stats.holds}`],
+        ...noDuplicates(st),
+      ];
+    },
+  },
+  {
+    name: 'unknown-result',
+    once: true,
+    title: '送出結果不明（頁面等到逾時，網站其實已經保留）：不重送，停下來請你確認',
+    async run({ ctx, popup }) {
+      await scenario(ctx, 'submit-unknown');
+      await fillPopup(popup);
+      await clickAndRead(popup, '#btnRunNow');
+      const s = await waitTask(popup, stopped, 30000);
+      await sleep(3000);
+      const st = await siteState(ctx);
+      return [
+        ['停下來請你確認', s.task.result.kind === 'unknown-result' && wfState(s.task) === 'MANUAL_CONFIRMATION', resultMsg(s)],
+        ['下一步：請你看頁面或訂單查詢，助手不重送', /不會自己重送/.test((s.task.handoff || {}).next || ''), (s.task.handoff || {}).next],
+        ['只送出一次（伺服器其實有保留）', st.stats.holdRequests === 1 && st.stats.holdsDropped === 1, `選購請求 ${st.stats.holdRequests}、回應太晚 ${st.stats.holdsDropped}`],
+        ...noDuplicates(st),
+      ];
+    },
+  },
+  {
+    name: 'review-mismatch',
+    once: true,
+    title: '確認頁的內容跟計畫不一致（網站改了張數）：不交接付款，停下來請你確認',
+    async run({ ctx, popup }) {
+      await scenario(ctx, 'quantity-changed');
+      await fillPopup(popup);
+      await clickAndRead(popup, '#btnRunNow');
+      const s = await waitTask(popup, stopped, 30000);
+      const st = await siteState(ctx);
+      return [
+        ['停下來請你確認，不是付款前交接', s.task.result.kind === 'review-mismatch' && wfState(s.task) === 'MANUAL_CONFIRMATION', resultMsg(s)],
+        ['說明哪裡不一樣', /全票：預計 2 張，確認頁是 1 張/.test(s.task.result.msg) && /金額：預計 NT\$280，確認頁是 NT\$170/.test(s.task.result.msg), s.task.result.msg],
+        ['不能按「繼續」跳過付款前的核對以外的步驟：沒有確認請求', st.stats.confirmRequests === 0, `確認請求 ${st.stats.confirmRequests}`],
+        ...noDuplicates(st),
+      ];
+    },
+  },
+  {
+    name: 'pause-resume',
+    once: true,
+    title: '暫停：做完手上的檢查就停，不再做新的操作；按「繼續」從目前這一頁接著做',
+    async run({ ctx, popup }) {
+      await scenario(ctx, 'slow', 'delayMs=1500');
+      await fillPopup(popup);
+      await clickAndRead(popup, '#btnRunNow');
+      await popup.waitForSelector('#btnPause:not([hidden])', { timeout: 5000 });
+      const p = await clickAndRead(popup, '#btnPause');
+      const s = await waitTask(popup, (t) => t.phase === 'paused', 10000);
+      await sleep(5000);   // 列表讀完之後也不會往下做
+      const mid = await siteState(ctx);
+      const midTask = (await status(popup)).task;
+      const r = await clickAndRead(popup, '#btnResume');
+      const s2 = await waitTask(popup, ready, 60000);
+      const st = await siteState(ctx);
+      return [
+        ['暫停了', /已暫停/.test(p) && s.task.phase === 'paused' && wfState(s.task) === 'PAUSED', `${s.task.phase} ${wfState(s.task)}`],
+        ['暫停後沒有再做任何操作', mid.stats.holdRequests === 0 && midTask.phase === 'paused', `選購 ${mid.stats.holdRequests}、${midTask.phase}`],
+        ['按「繼續」從目前這一頁接著做到付款前交接', /已繼續/.test(r) && ready(s2.task) && inOrder(wfPath(s2.task), ['PAUSED', 'PAGE_DETECTION', 'PAYMENT_HANDOFF']), wfPath(s2.task).join('→')],
+        ['只送出一次選購', st.stats.holdRequests === 1, `選購 ${st.stats.holdRequests}`],
+        ...noDuplicates(st),
+      ];
+    },
+  },
+  {
+    name: 'cancel-midway',
+    once: true,
+    title: '中途取消：之後不再做任何操作',
+    async run({ ctx, popup }) {
+      await scenario(ctx, 'slow', 'delayMs=1500');
+      await fillPopup(popup);
+      await clickAndRead(popup, '#btnRunNow');
+      await sleep(300);
+      await clickAndRead(popup, '#btnCancel');
+      const s = await waitTask(popup, (t) => t.phase === 'cancelled', 10000);
+      await sleep(5000);
+      const st = await siteState(ctx);
+      return [
+        ['已取消', s.task.phase === 'cancelled' && wfState(s.task) === 'CANCELLED', `${s.task.phase} ${wfState(s.task)}`],
+        ['取消後沒有送出選購', st.stats.holdRequests === 0, `選購 ${st.stats.holdRequests}`],
+        ...noDuplicates(st),
+      ];
+    },
+  },
+  {
+    name: 'resume-no-duplicate',
+    once: true,
+    title: '重新整理、按上一頁再按「繼續」：已經做完的步驟（保留名額）不重做',
+    async run({ ctx, popup }) {
+      await scenario(ctx, 'normal');
+      await fillPopup(popup, { autoAgree: false });
+      await clickAndRead(popup, '#btnRunNow');
+      const s = await waitTask(popup, stopped, 30000);
+      const page = sitePage(ctx);
+      await page.reload();
+      await sleep(800);
+      await page.goBack();
+      await sleep(800);
+      const backOnSelect = /\/pool\/select\//.test(page.url());
+      await popup.bringToFront();
+      await popup.setChecked('#autoAgree', true);
+      await sleep(400);
+      const r = await clickAndRead(popup, '#btnResume');
+      const s2 = await waitTask(popup, ready, 40000);
+      const st = await siteState(ctx);
+      return [
+        ['先停在填資料（你設定不自動勾同意）', s.task.result.kind === 'agree' && wfState(s.task) === 'MANUAL_CONFIRMATION', resultMsg(s)],
+        ['重新整理、按上一頁回到選票頁', backOnSelect, page.url()],
+        ['按「繼續」後接著做到付款前交接', /已繼續/.test(r) && ready(s2.task), resultMsg(s2)],
+        ['選購只送出一次（已保留的不重送）', st.stats.holdRequests === 1, `選購 ${st.stats.holdRequests}`],
+        ...noDuplicates(st),
+      ];
+    },
+  },
+  {
+    name: 'sw-restart',
+    once: true,
+    title: 'service worker 重啟：流程狀態從儲存區接回來，按「繼續」照常走完',
+    async run({ ctx, popup, extId }) {
+      await scenario(ctx, 'normal');
+      await fillPopup(popup, { autoAgree: false });
+      await clickAndRead(popup, '#btnRunNow');
+      const s = await waitTask(popup, stopped, 30000);
+      const before = wfPath(s.task).length;
+      const sw = ctx.serviceWorkers().find((w) => w.url().includes(extId));
+      await sw.evaluate(() => { self.__ithMarker = 'before'; });
+      const restarted = await restartServiceWorker(ctx, popup, extId);
+      await sleep(1000);
+      await popup.setChecked('#autoAgree', true);
+      await sleep(400);
+      const r = await clickAndRead(popup, '#btnResume');
+      const s2 = await waitTask(popup, ready, 40000);
+      const sw2 = ctx.serviceWorkers().find((w) => w.url().includes(extId));
+      const marker = sw2 ? await sw2.evaluate(() => self.__ithMarker || 'fresh').catch(() => 'closed') : 'none';
+      const st = await siteState(ctx);
+      return [
+        ['service worker 真的重啟了（記憶體是新的）', restarted && marker === 'fresh', `${restarted} ${marker}`],
+        ['重啟後按「繼續」照常做到付款前交接', /已繼續/.test(r) && ready(s2.task), resultMsg(s2)],
+        ['流程紀錄接著原本的寫，沒有重來', wfPath(s2.task).length > before && inOrder(wfPath(s2.task), ['BUYER_INFO', 'MANUAL_CONFIRMATION', 'PAGE_DETECTION', 'BUYER_INFO', 'PAYMENT_HANDOFF']), wfPath(s2.task).join('→')],
+        ['選購只送出一次', st.stats.holdRequests === 1, `選購 ${st.stats.holdRequests}`],
+        ...noDuplicates(st),
+      ];
+    },
+  },
+  {
     name: 'slow',
     title: '回應很慢（每個 API 慢 3 秒）：耐心等，不會因為等太久又按一次',
     async run({ ctx, popup }) {
@@ -617,9 +882,10 @@ const SCENARIOS = [
       const requests = ibonRequests;
       await popup.fill('#eventUrl', IBON_URL);
       await sleep(600);
-      await popup.fill('#ibonAreas', '全票\n看台\n搖滾區');
-      await popup.fill('#ibonQty', '2');
-      await popup.fill('#ibonMaxPrice', '250');
+      // 「我的需求」：票區偏好、票種張數（合計 2 張）、最高單價
+      await popup.fill('#areas', '全票\n看台\n搖滾區');
+      await popup.fill('#tickets', '全票 2');
+      await popup.fill('#maxUnitPrice', '250');
       const hint = await popup.textContent('#regUrl');
       const runOff = [];
       for (const id of ['#btnSchedule', '#btnRunNow', '#btnCheck', '#btnHealth']) if (await popup.isDisabled(id)) runOff.push(id);

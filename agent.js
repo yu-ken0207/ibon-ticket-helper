@@ -267,11 +267,13 @@
    *   reload     表單權杖過期：重新整理這一頁拿新的，再做一次
    *   gate       排隊、驗證碼、機器人檢查：停下來交給你
    *   duplicate  網站說重複送出：上一次其實已經送到了，不要再送
+   *   login      網站說要重新登入（401、LOGIN_REQUIRED）：交給你
    *   stop       資料有問題或認不得的錯誤：停下來交給你
    */
   function classifyError(code, status = 0) {
     const c = String(code || '').toUpperCase();
     if (/QUEUE|CAPTCHA|BOTCHECK|CHALLENGE/.test(c)) return 'gate';
+    if (['LOGIN_REQUIRED', 'UNAUTHORIZED', 'SESSION_EXPIRED'].includes(c) || status === 401) return 'login';
     if (['RATE_LIMITED', 'TOO_MANY_REQUESTS'].includes(c) || status === 429) return 'rate-limit';
     if (['TRANSIENT', 'INTERNAL', 'CLIENT_TIMEOUT', 'NETWORK', 'TIMEOUT'].includes(c)) return 'retry';
     if (['SOLD_OUT', 'INSUFFICIENT'].includes(c)) return 'next-slot';
@@ -316,6 +318,165 @@
       return msg;
     }
     return `關鍵字對不到任何時段。頁面上的時段有：${listNames(p.names)}${fallback ? '。你開了遞補，開賣時會改選第一個能買的時段' : '。請在開賣前修改關鍵字'}`;
+  }
+
+  /* ───── 內嵌 lib/planner.js ───── */
+  // RequirementMatcher 與 PurchasePlanner（純函式，不碰網頁）：把你的需求跟網站讀到的場次、票區、票種、價格比對，
+  // 排出候選並說明每一個選或不選的理由。這裡只做決定；網站操作由流程（src/agent/60-flow.js）照決定做，每一步還要過 PolicyGate。
+  // 場次的關鍵字比對、票種配對沿用 lib/flow.js（hasAll、planTickets），不另外寫一套。
+
+  const toInt = (v) => {
+    const n = Number.parseInt(String(v == null ? '' : v).replace(/[,，\s]/g, ''), 10);
+    return Number.isInteger(n) && n > 0 ? n : null;
+  };
+  const linesOf = (v) => (Array.isArray(v) ? v : String(v == null ? '' : v).split(/\r?\n/)).map((x) => String(x).trim()).filter(Boolean);
+  const plain = (s) => String(s || '').replace(/[\s　]+/g, '').replace(/[–—~～〜－-]/g, '-');
+
+  /** 設定 → 需求：場次偏好、票種張數、票區偏好、最高單價、總金額上限、遞補 */
+  function requirementOf(cfg) {
+    const c = cfg || {};
+    const tickets = Array.isArray(c.tickets) ? c.tickets : [];
+    const need = tickets.reduce((a, t) => a + (Number.isInteger(t.qty) && t.qty > 0 ? t.qty : 0), 0);
+    return {
+      sessions: linesOf(c.keywords), tickets, areas: linesOf(c.areas),
+      maxUnitPrice: toInt(c.maxUnitPrice), maxTotal: toInt(c.maxTotal), fallback: !!c.fallback, need: need || 1,
+    };
+  }
+
+  /**
+   * RequirementMatcher：票種張數對網站的票種與價格（加上票區加價 surcharge），檢查最高單價與總金額上限。
+   * types: [{ id?, name, price }]。回 { ok, kind?: 'tickets' | 'budget', plan?, msg }
+   */
+  function matchTickets(req, types, { surcharge = 0, maxPerOrder = Infinity } = {}) {
+    const priced = (types || []).map((t, i) => ({ id: t.id || t.name || String(i), name: t.name, price: (Number(t.price) || 0) + surcharge }));
+    const p = planTickets(priced, req.tickets, maxPerOrder);
+    if (!p.ok) return { ok: false, kind: 'tickets', msg: p.msg };
+    const over = req.maxUnitPrice ? p.plan.filter((x) => x.price > req.maxUnitPrice) : [];
+    if (over.length) return { ok: false, kind: 'budget', plan: p, msg: `${over.map((x) => `${x.name}每張 NT$${x.price}`).join('、')}超過你設定的最高單價 NT$${req.maxUnitPrice}` };
+    if (req.maxTotal && p.amount > req.maxTotal) return { ok: false, kind: 'budget', plan: p, msg: `合計 NT$${p.amount}（${p.total} 張）超過你設定的總金額上限 NT$${req.maxTotal}` };
+    return { ok: true, plan: p, msg: `${p.plan.map((x) => `${x.name} ${x.qty} 張`).join('、')}，合計 NT$${p.amount}` };
+  }
+
+  /** 場次的判斷與理由 */
+  function judgeSession(s, need, skipped) {
+    if (skipped.has(s.id)) return ['skip', '這次已經試過，買不到'];
+    if (s.status === 'unknown') return ['unknown', '頁面上看不出能不能買'];
+    if (s.status === 'not-open') return ['wait', '還沒開放'];
+    if (s.status === 'full') return ['skip', '已額滿'];
+    if (!isBuyable(s)) return ['skip', '不能買'];
+    if (s.remaining != null && s.remaining < need) return ['skip', `只剩 ${s.remaining} 張，不夠 ${need} 張`];
+    return ['ok', s.remaining != null ? `可以買（剩 ${s.remaining} 張）` : '可以買'];
+  }
+
+  /**
+   * PurchasePlanner：場次。依偏好順序（一行一組，空白分隔的每一段都要對到），每個對到的場次都附理由：
+   *   ok        選這個（同一組裡有能買的就選第一個）
+   *   unknown   這一組沒有能買的，而且有狀態看不出來的：不猜，停下來問你
+   *   not-open  這一組還沒開放：等，不跳去比較不想要的那組
+   *   sold-out  偏好的都額滿、剩的不夠或已經試過；no-match 關鍵字都對不到
+   * 開了遞補，偏好都沒結果時改選第一個能買的。
+   * 回 { kind, slot?, line?, fallback?, ranked: [{ id, text, status, remaining, pref, verdict, reason }], msg }
+   */
+  function planSession(slots, req, { skip = [] } = {}) {
+    const skipped = new Set(skip);
+    const ranked = [];
+    const seen = new Set();
+    let result = null;
+    req.sessions.forEach((line, i) => {
+      if (!words(line).length) return;
+      const pref = i + 1;
+      for (const s of slots.filter((x) => hasAll(x.text, line) && !seen.has(x.id))) {
+        seen.add(s.id);
+        const [verdict, reason] = judgeSession(s, req.need, skipped);
+        ranked.push({ id: s.id, text: s.text, status: s.status, remaining: s.remaining == null ? null : s.remaining, pref, verdict, reason });
+      }
+      if (result) return;   // 已經決定了，後面的偏好只列出來給你看
+      const mine = ranked.filter((r) => r.pref === pref);
+      const ok = mine.find((r) => r.verdict === 'ok');
+      if (ok) { ok.verdict = 'chosen'; result = { kind: 'ok', slot: slots.find((s) => s.id === ok.id), line }; return; }
+      const unk = mine.find((r) => r.verdict === 'unknown');
+      if (unk) { result = { kind: 'unknown', line, text: unk.text }; return; }
+      const wait = mine.find((r) => r.verdict === 'wait');
+      if (wait) result = { kind: 'not-open', line, text: wait.text };
+    });
+    if (!result && req.fallback) {
+      const any = slots.find((s) => judgeSession(s, req.need, skipped)[0] === 'ok');
+      if (any) {
+        result = { kind: 'ok', slot: any, line: null, fallback: true };
+        ranked.push({ id: any.id, text: any.text, status: any.status, remaining: any.remaining == null ? null : any.remaining, pref: null, verdict: 'chosen', reason: '偏好都買不到，遞補第一個能買的' });
+      } else if (slots.some((s) => s.status === 'not-open')) result = { kind: 'not-open', line: null };
+    }
+    if (!result) {
+      // 跟 lib/flow.js 的 describePick 相容：sold-out 帶 names 與 short（剩的不夠的那一個），no-match 帶頁面上的場次
+      const short = ranked.find((x) => x.remaining != null && x.remaining > 0 && x.remaining < req.need && (x.status === 'available' || x.status === 'limited'));
+      result = ranked.length
+        ? { kind: 'sold-out', names: [...new Set(ranked.map((x) => x.text))], short: short ? { text: short.text, remaining: short.remaining } : null }
+        : { kind: 'no-match', names: slots.map((s) => s.text) };
+    }
+    return { ...result, ranked: ranked.slice(0, 20), msg: describeSessionPlan(result, ranked, slots) };
+  }
+
+  function describeSessionPlan(r, ranked, slots) {
+    const chosen = ranked.find((x) => x.verdict === 'chosen');
+    switch (r.kind) {
+      case 'ok': return `選「${chosen.text}」（${chosen.pref ? `第 ${chosen.pref} 個偏好` : '遞補'}，${chosen.reason}）`;
+      case 'unknown': return `偏好的「${r.text}」頁面上看不出能不能買。為了不選錯，先停下來`;
+      case 'not-open': return r.text ? `偏好的「${r.text}」還沒開放` : '還沒開放';
+      case 'sold-out': return `偏好的場次都買不到：${ranked.slice(0, 6).map((x) => `${x.text}（${x.reason}）`).join('、')}`;
+      default: return `關鍵字對不到任何場次。頁面上的場次有：${slots.slice(0, 6).map((s) => s.text).join('、')}${slots.length > 6 ? '…' : ''}`;
+    }
+  }
+
+  /**
+   * PurchasePlanner：票區（選票頁有分區時）。areas: [{ id, name, surcharge, remaining, soldOut }]，types 是頁面上的票種與單價。
+   * 有票區偏好就照偏好順序（一行一組），沒設就照頁面順序；每個票區都附理由：售完、剩的不夠、超過預算、這次試過買不到。
+   * 回 { kind: 'ok' | 'none', area?, tickets?（matchTickets 的結果）, ranked, msg }
+   */
+  function planArea(areas, req, types, { skip = [], maxPerOrder = Infinity } = {}) {
+    const skipped = new Set(skip);
+    const order = [];
+    const add = (a, pref) => { if (!order.some((o) => o.a.id === a.id)) order.push({ a, pref }); };
+    if (req.areas.length) req.areas.forEach((line, i) => areas.filter((a) => hasAll(a.name, line)).forEach((a) => add(a, i + 1)));
+    else areas.forEach((a) => add(a, null));
+    const ranked = [];
+    let pick = null;
+    for (const { a, pref } of order) {
+      let verdict = 'ok', reason = '';
+      const t = matchTickets(req, types, { surcharge: a.surcharge || 0, maxPerOrder });
+      if (skipped.has(a.id)) { verdict = 'skip'; reason = '這次已經試過，售完了'; }
+      else if (a.soldOut || a.remaining === 0) { verdict = 'skip'; reason = '已售完'; }
+      else if (a.remaining != null && a.remaining < req.need) { verdict = 'skip'; reason = `只剩 ${a.remaining} 張，不夠 ${req.need} 張`; }
+      else if (!t.ok) { verdict = 'skip'; reason = t.msg; }
+      else reason = `${a.surcharge ? `每張加 NT$${a.surcharge}，` : ''}${t.msg}${a.remaining != null ? `（剩 ${a.remaining} 張）` : ''}`;
+      if (verdict === 'ok' && !pick) { verdict = 'chosen'; pick = { a, t }; }
+      ranked.push({ id: a.id, name: a.name, pref, verdict, reason });
+    }
+    if (pick) return { kind: 'ok', area: pick.a, tickets: pick.t, ranked, msg: `選「${pick.a.name}」：${ranked.find((x) => x.verdict === 'chosen').reason}` };
+    const why = ranked.length ? ranked.map((x) => `${x.name}（${x.reason}）`).join('、') : `票區偏好對不到頁面上的票區（有：${areas.map((a) => a.name).join('、')}）`;
+    return { kind: 'none', ranked, msg: `沒有符合需求的票區：${why}` };
+  }
+
+  /**
+   * ORDER_REVIEW：確認頁讀到的內容（summary）跟計畫（expect）比對；不一致就不交接付款，停下來請你確認。
+   *   summary { session, area, items: [{ name, qty }], amount }
+   *   expect  { sessionText, areaName, items: [{ name, qty }], amount }
+   */
+  function reviewOrder(summary, expect) {
+    const s = summary || {};
+    const e = expect || {};
+    const items = Array.isArray(s.items) ? s.items : [];
+    const diffs = [];
+    if (!items.length) diffs.push('確認頁讀不到票種與張數');
+    if (e.sessionText && plain(s.session) !== plain(e.sessionText)) diffs.push(`場次：預計「${e.sessionText}」，確認頁是「${s.session || '（沒寫）'}」`);
+    if (e.areaName && s.area !== e.areaName) diffs.push(`票區：預計「${e.areaName}」，確認頁是「${s.area || '（沒寫）'}」`);
+    for (const it of e.items || []) {
+      const got = items.find((x) => x.name === it.name);
+      if (!got || got.qty !== it.qty) diffs.push(`${it.name}：預計 ${it.qty} 張，確認頁是 ${got ? got.qty : 0} 張`);
+    }
+    // 沒有計畫的票種（例如你自己操作到確認頁再按「繼續」）：不比對張數，只確認讀得到內容
+    if ((e.items || []).length) for (const got of items) if (!e.items.some((x) => x.name === got.name)) diffs.push(`確認頁多了「${got.name} ${got.qty} 張」`);
+    if (e.amount != null && s.amount != null && s.amount !== e.amount) diffs.push(`金額：預計 NT$${e.amount}，確認頁是 NT$${s.amount}`);
+    return { ok: !diffs.length, diffs, msg: diffs.length ? `確認頁的內容跟計畫不一致：${diffs.join('；')}` : '確認頁的內容跟計畫一致' };
   }
 
   /* ───────────────────────── 語意定位 ─────────────────────────
@@ -504,6 +665,29 @@
       });
     },
 
+    /**
+     * 票區（分區域時才有）：標題寫「區域」的那一組選項 → [{ id, name, surcharge, remaining, soldOut, el }]；沒有就空陣列。
+     * 名稱、加價、剩幾張都從選項的標籤文字讀（例如「戶外池　每張加 NT$30　剩 30 張」），售完的選項會停用。
+     */
+    areas() {
+      const group = deepAll('fieldset').find((f) => /區域/.test(textOf(f.querySelector('legend'))));
+      if (!group) return [];
+      return [...group.querySelectorAll('input[type="radio"]')].map((r) => {
+        const t = textOf(r.labels && r.labels[0]);
+        const add = t.match(/加\s*NT\$\s*([\d,]+)/);
+        const left = t.match(/剩\s*(\d+)\s*張/);
+        const soldOut = r.disabled || /已售完|售完/.test(t);
+        return { id: r.value, name: t.split(/\s+/)[0], surcharge: add ? Number(add[1].replace(/,/g, '')) : 0, remaining: left ? Number(left[1]) : (soldOut ? 0 : null), soldOut, el: r };
+      });
+    },
+
+    /** 選票區：點那個選項，回傳有沒有選到 */
+    chooseArea(area) {
+      if (!area || !area.el || area.el.disabled) return false;
+      if (!area.el.checked) area.el.click();
+      return area.el.checked;
+    },
+
     maxPerOrder() {
       const vals = $$('select[name^="qty_"] option').map((o) => Number(o.value)).filter(Number.isFinite);
       return vals.length ? Math.max(...vals) : Infinity;
@@ -585,6 +769,22 @@
     confirmButton: () => buttonByText('確認建立訂單'),
 
     summary: () => textOf($('main')).slice(0, 300),
+
+    /** 確認頁的訂單內容：場次、票區、票種張數、合計、保留剩幾秒（給 ORDER_REVIEW 核對） */
+    orderSummary() {
+      const main = $('main') || document.body;
+      const line = (re) => { const p = byText('p', re, main)[0]; return p ? textOf(p) : ''; };
+      const items = byText('li', /×\s*\d+/, main).map((li) => {
+        const m = textOf(li).match(/^(.+?)\s*×\s*(\d+)/);
+        return m ? { name: m[1].trim(), qty: Number(m[2]) } : null;
+      }).filter(Boolean);
+      const total = line(/^合計/).match(/NT\$\s*([\d,]+)/);
+      return {
+        session: line(/^入場時段：/).replace(/^入場時段：/, ''),
+        area: line(/^區域：/).replace(/^區域：/, '') || null,
+        items, amount: total ? Number(total[1].replace(/,/g, '')) : null, holdLeftSec: POOL.holdLeft(),
+      };
+    },
 
     /* ── 完成頁、錯誤頁 ── */
 
@@ -843,17 +1043,19 @@
     }
   }
 
-  /* ───────────────────────── 通用購票流程 ─────────────────────────
-   * 每次載入頁面都問背景程式該做什麼（90-boot.js），run 模式就照這一頁是哪一步來做一步：
-   *   list     讀時段狀態 → 照偏好選時段（還沒開放就等、讀取失敗就重試）→ 進選票頁
-   *   select   照設定填各票種張數 → 送出一次 → 被拒就看原因：換時段、重試或停下來
-   *   info     檢查你提供的資料 → 填好、勾同意 → 送出一次 → 網站說哪一欄有問題就交給你
-   *   confirm  一定停在這裡：標出「確認建立訂單」，請你自己檢查後按；之後提醒保留時間
-   *   queue    網站要排隊：停下來交給你，不略過排隊
-   *   error    網站錯誤頁：暫時性錯誤就重新整理（有次數上限），其他交給你
-   * 網站說請求太多（429）：讀取照網站給的 Retry-After 等（背景程式看得到標頭；沒給就逐步拉長），有次數上限；送出不自動重送，交給你。
-   * 是不是 429 不只看頁面上的字：很多網站只寫「系統忙碌」，所以出錯時也問背景程式剛剛的回應狀態（rateSeenSince）。
-   * 判斷寫在 lib/flow.js；頁面怎麼讀寫寫在網站轉接（10-pool.js）。 */
+  /* ───────────────────────── 購票流程（WorkflowEngine 的頁面端） ─────────────────────────
+   * 流程狀態記在背景程式（lib/workflow.js，task.wf）。這裡每進一個狀態都先 enter() 報到，每個網站操作都先 allowed() 過
+   * PolicyGate（lib/policy.js）：被暫停、取消、狀態轉移不合法、政策不是 ALLOWED，就不做。要選哪個場次、票區、票種張數，
+   * 以及確認頁對不對，交給 lib/planner.js 決定並附理由；這裡只照決定操作頁面（網站轉接 10-pool.js）。
+   *   頁面          狀態
+   *   場次列表      PAGE_DETECTION → ACTIVITY_READ → REQUIREMENT_CHECK → SESSION_SELECTION（還沒開放：WAITING_FOR_SALE）
+   *   選票頁        TICKET_AREA_SELECTION（有分區就選票區）→ QUANTITY_SELECTION（張數）→ 送出選購
+   *   購票人資料頁  BUYER_INFO → 送出
+   *   確認頁        ORDER_REVIEW（核對）→ PAYMENT_HANDOFF：一定停在這裡，不替你按「確認建立訂單」，付款由你自己來
+   *   排隊、驗證、請求太多、要你確認的：交給你（背景程式依回報的結果轉到 QUEUE／CHALLENGE／RATE_LIMIT／MANUAL_CONFIRMATION）
+   * 已經做完的步驟記在 wf.done（hold＝已保留名額、buyer＝已送出購票人資料）：重新整理、按上一頁、按「繼續」都不會重做。
+   * 送出結果不明（連線中斷、逾時）一律不重送；確定失敗（伺服器回錯誤）才照次數上限重送。
+   * 網站說請求太多（429）：讀取照 Retry-After 等（背景程式看得到標頭），有次數上限；送出不自動重送。是不是 429 也會問背景程式，不只看頁面上的字。 */
 
   /** 時段列表的錯誤訊息：網站自己已經寫了「時段載入失敗」就不再加，也去掉叫人按按鈕的那一句 */
   const listErrText = (t) => { const x = t.replace(/。請按.*$/, ''); return /^時段載入失敗/.test(x) ? x : `時段載入失敗：${x}`; };
@@ -866,8 +1068,44 @@
     setCountdown(null);
     panelLog(msg, cls);
     if (!ok) blackbox(kind, msg);
-    await call('result', { ok, kind, msg, url: location.href, handOff: !!extra.handOff }, 1500);
+    const kindOfPage = (() => { try { return SITE.pageKind(); } catch (_) { return ''; } })();
+    await call('result', { ok, kind, msg, url: location.href, handOff: !!extra.handOff, pageKind: kindOfPage, summary: extra.summary || null }, 1500);
   }
+
+  /** 進到一個流程狀態之前先向背景程式報到；被暫停、取消，或轉移不合法就不准，這一頁不再做任何事 */
+  async function enter(st, extra = {}) {
+    const r = await call('wf', { state: st, ...extra }, 2500);
+    if (r && r.ok) { if (r.wf) state.wf = r.wf; return true; }
+    state.aborted = true;
+    if (r && r.reason === 'paused') setStatus('已暫停：到擴充功能按「繼續」，從這一頁接著做', 'warn');
+    else if (r && r.msg) setStatus(r.msg, 'err');
+    return false;
+  }
+
+  /** 把這一步的規劃（候選與理由）記到流程狀態裡，給設定頁顯示；不換狀態 */
+  const notePlan = (st, plan) => call('wf', { state: st, plan }, 2500);
+
+  /**
+   * PolicyGate：每個網站操作之前問一次。ALLOWED 才做；被暫停就安靜停下；其他照原因交給你
+   * （onDeny 可以換成這一步自己的說明，例如不自動勾選同意）。
+   */
+  async function allowed(action, onDeny) {
+    const r = await call('gate', { action }, 2500);
+    if (r && r.decision === 'ALLOWED') return true;
+    state.aborted = true;
+    if (r && r.paused) { setStatus('已暫停：到擴充功能按「繼續」，從這一頁接著做', 'warn'); return false; }
+    if (onDeny) { await onDeny(r); return false; }
+    const why = r ? `${r.label}：${r.reason}` : `${action}：背景程式沒有回應`;
+    await finish(false, 'policy', `${why}（${r ? r.decision : 'UNKNOWN'}），先停下來交給你`, { handOff: true });
+    return false;
+  }
+
+  /** 已經做完的步驟（wf.done） */
+  const doneStep = (k) => !!(state.wf && state.wf.done && state.wf.done[k]);
+  const selectionNow = () => (state.wf && state.wf.selection) || {};
+
+  /** 規劃結果只留給人看的部分（候選與理由），送給背景程式記下 */
+  const briefPlan = (kind, p) => ({ kind, result: p.kind, msg: p.msg, ranked: (p.ranked || []).slice(0, 20) });
 
   /** 向背景程式要一次重試額度（load 載入失敗／not-open 還沒開放／fail 其他失敗），拿到就等它給的時間 */
   async function grant(reason, msg, status = 0) {
@@ -932,59 +1170,80 @@
     return before;
   }
 
+  /** 送出結果不明：連線中斷、逾時。不知道網站到底收到沒有，一律不重送 */
+  const UNKNOWN_OUTCOME = ['NETWORK', 'CLIENT_TIMEOUT', 'TIMEOUT'];
+
   /**
-   * 送出這一步（select／info）：同一次只按一次，按了就等結果，不會因為等太久又按。
-   * 要再送一定是錯誤處理決定的（伺服器錯誤之類），而且向背景程式要額度、有次數上限。
+   * 送出這一步（select 選購／info 購票人資料）：同一次只按一次，按了就等結果，不會因為等太久又按。
+   * 要再送，一定是錯誤處理判斷「確定失敗了」（伺服器回錯誤），而且向背景程式要額度、每次都再過一次 PolicyGate。
+   * area 是這次選的票區（有分區時）：售完就記下這個票區，重新整理選票頁改選下一個。
    */
-  async function submitOnce(stepName, d, slotId) {
+  async function submitOnce(stepName, d, slotId, area = null) {
+    const action = stepName === 'select' ? 'submit-hold' : 'submit-buyer';
     for (;;) {
       if (state.aborted || state.left) return;
+      if (!(await allowed(action))) return;
       const sentAt = Date.now();
       const clicked = stepName === 'select' ? SITE.submitSelect() : SITE.submitInfo();
       if (!clicked) return finish(false, 'no-button', '找不到送出按鈕，先停下來', { handOff: true });
       setStatus('已送出，等網站回應…', 'ok');
       const out = await waitOutcomeFor(stepName, 60000);
       if (out.kind === 'left') return;
-      if (out.kind === 'timeout') return finish(false, 'timeout', '送出後 60 秒都沒有回應，先停下來。請看頁面上的狀況，不要急著再按', { handOff: true });
+      if (out.kind === 'timeout') return finish(false, 'unknown-result', '送出後 60 秒都沒有回應，結果不明。為了避免重複送出，助手不重送，先停下來交給你', { handOff: true });
       const what = `網站回覆「${out.text}」`;
-      let action = classifyError(out.code, out.status);
+      let act = classifyError(out.code, out.status);
       // 頁面沒寫 429，但回應其實是 429：一樣當成請求太多（不自動重送）
-      if (['retry', 'reload', 'wait', 'restart', 'stop'].includes(action) && await rateSeenSince(sentAt)) action = 'rate-limit';
-      if (action === 'next-slot') {
+      if (['retry', 'reload', 'wait', 'restart', 'stop'].includes(act) && await rateSeenSince(sentAt)) act = 'rate-limit';
+      if (act === 'retry' && UNKNOWN_OUTCOME.includes(String(out.code || '').toUpperCase())) {
+        return finish(false, 'unknown-result', `${what}。送出後連線中斷或逾時，不知道網站有沒有收到；為了避免重複送出，助手不重送，先停下來交給你`, { handOff: true });
+      }
+      if (act === 'login') return finish(false, 'login-required', `${what}。網站要你重新登入，助手先停下來`, { handOff: true });
+      if (act === 'next-slot') {
+        if (area && slotId) {
+          // 這個票區賣完了：記下來，重新整理選票頁改選下一個票區（同一個場次）
+          await call('skip-area', { slotId, areaId: area.id }, 1500);
+          log(`${what}，「${area.name}」買不到了，改選下一個票區`, 'warn');
+          if (!(await allowed('reload-page'))) return;
+          location.reload();
+          return;
+        }
         if (slotId) await call('skip-slot', { slotId }, 1500);
         log(`${what}，改選下一個時段`, 'warn');
         location.assign(SITE.listUrl());
         return;
       }
-      if (action === 'rate-limit') {
+      if (act === 'rate-limit') {
         // 送出被說請求太多：不自動重送，什麼時候再送由你決定
         return finish(false, 'rate-limited', `${what}。網站說請求太多，助手不自動重送，先停下來交給你：請等一下再自己按，或到擴充功能按「繼續」`, { handOff: true });
       }
-      if (action === 'retry') {
+      if (act === 'retry') {
         const r = await grant('fail', what);
         if (!r) return finish(false, 'fail-limit', `${what}，重試次數用完了`, { handOff: true });
-        continue;   // 前一次確定失敗了，才再送一次
+        continue;   // 前一次確定失敗了，才再送一次（迴圈開頭會再過一次 PolicyGate）
       }
-      if (action === 'reload') {
+      if (act === 'reload') {
         // 表單權杖過期之類：重新整理這一頁拿新的，這一步會重新做一次（有次數上限）
         const r = await grant('fail', what);
         if (!r) return finish(false, 'fail-limit', `${what}，重試次數用完了`, { handOff: true });
+        if (!(await allowed('reload-page'))) return;
         location.reload();
         return;
       }
-      if (action === 'duplicate') {
+      if (act === 'duplicate') {
         // 網站說已經收到了：上一次其實送到了，不要再送，往下一步看看
         log(`${what}，上一次其實已經送到了，不再重送`, 'warn');
         location.assign(SITE.nextUrl(stepName));
         return;
       }
-      if (action === 'wait' || action === 'restart') {
+      if (act === 'wait' || act === 'restart') {
         const r = await grant('fail', what);
         if (!r) return finish(false, 'fail-limit', `${what}，重試次數用完了`, { handOff: true });
+        // 保留逾時、步驟對不上：之前做完的步驟不算數了
+        await call('wf', { state: state.wf ? state.wf.state : 'QUANTITY_SELECTION', clearDone: true }, 2500);
         location.assign(SITE.listUrl());
         return;
       }
-      if (action === 'gate') return finish(false, out.code.toLowerCase(), `${what}。這一關要你自己處理，助手先停下來`, { handOff: true });
+      if (act === 'gate') return finish(false, out.code.toLowerCase(), `${what}。這一關要你自己處理，助手先停下來`, { handOff: true });
       const fields = Object.entries(out.fields || {}).map(([k, v]) => `${k}：${v}`).join('；');
       return finish(false, out.code || 'rejected', `${what}${fields ? `（${fields}）` : ''}。資料可能要修改，先停下來`, { handOff: true });
     }
@@ -1002,9 +1261,11 @@
     return { kind: 'timeout' };
   }
 
+  /** 場次列表：讀活動與場次 → 比對需求 → 選場次（還沒開放就等，讀取失敗就重試） */
   async function onList(d) {
     const cfg = d.cfg || {};
-    const need = totalWanted(cfg);
+    const req = requirementOf(cfg);
+    if (!(await enter('ACTIVITY_READ'))) return;
     let prev = null;
     let since = pageStart();   // 這一輪讀取是從什麼時候開始的（給 rateSeenSince）
     const refresh = () => { since = Date.now(); return refreshList(); };
@@ -1014,44 +1275,76 @@
       if (!ls) {
         const r = await grant('load', '時段列表等了 30 秒還沒出來');
         if (!r) return finish(false, 'list-timeout', '時段列表一直沒有出來，先停下來', { handOff: true });
+        if (!(await allowed('reload-page'))) return;
         location.reload();
         return;
       }
       if (ls.error) {
         if (classifyError('', ls.status) === 'rate-limit' || await rateSeenSince(since)) {
           if (!(await rateWait(listErrText(ls.error)))) return;
+          if (!(await allowed('refresh-list'))) return;
           prev = refresh();
           await sleep(50);
           continue;
         }
+        if (classifyError('', ls.status) === 'login') return finish(false, 'login-required', `${listErrText(ls.error)}。網站要你重新登入，助手先停下來`, { handOff: true });
         const r = await grant('load', listErrText(ls.error), ls.status);
         if (!r) return finish(false, 'load-limit', `${ls.error}。連續 5 分鐘都沒有恢復，先停下來`, { handOff: true });
+        if (!(await allowed('refresh-list'))) return;
         prev = refresh();
         await sleep(50);
         continue;
       }
       send('load-ok', {});
-      const pick = pickSlot(ls.slots, cfg.keywords, { need, fallback: cfg.fallback, skip: d.skip || [] });
-      if (pick.kind === 'ok') {
-        log(describePick(pick, need), 'ok');
-        setStatus(`前往「${pick.slot.text}」選票種…`, 'ok');
-        if (!SITE.openSlot(pick.slot)) return finish(false, 'no-button', '找不到這個時段的選購按鈕，先停下來', { handOff: true });
+      if (!(await enter('REQUIREMENT_CHECK'))) return;
+      // 已經保留了名額（例如按上一頁回到列表）：不再選一次，免得重複保留
+      if (doneStep('hold')) {
+        return finish(false, 'already-held', `你已經保留了「${selectionNow().sessionText || '某個場次'}」的名額，助手不會再選一次`, { handOff: true });
+      }
+      // 票種與預算：先用列表上的票價檢查（票區加價在選票頁再檢查一次）
+      const prices = SITE.prices();
+      if (prices.length) {
+        const t = matchTickets(req, prices);
+        if (!t.ok && t.kind === 'budget') return finish(false, 'budget', `${t.msg}。沒有符合預算的選擇，不會送出選購`);
+      }
+      const plan = planSession(ls.slots, req, { skip: d.skip || [] });
+      await notePlan('REQUIREMENT_CHECK', briefPlan('session', plan));
+      if (plan.kind === 'ok') {
+        log(describePick(plan, req.need), 'ok');
+        if (!(await enter('SESSION_SELECTION', { selection: { slotId: plan.slot.id, sessionText: plan.slot.text } }))) return;
+        if (!(await allowed('select-session'))) return;
+        setStatus(`前往「${plan.slot.text}」選票種…`, 'ok');
+        if (!SITE.openSlot(plan.slot)) return finish(false, 'no-button', '找不到這個時段的選購按鈕，先停下來', { handOff: true });
         return;
       }
-      if (pick.kind === 'not-open') {
-        const r = await grant('not-open', describePick(pick, need));
-        if (!r) return finish(false, 'not-open-limit', `${describePick(pick, need)}，重試次數用完了`);
+      if (plan.kind === 'not-open') {
+        if (!(await enter('WAITING_FOR_SALE'))) return;
+        const r = await grant('not-open', describePick(plan, req.need));
+        if (!r) return finish(false, 'not-open-limit', `${describePick(plan, req.need)}，重試次數用完了`);
+        if (!(await allowed('refresh-list'))) return;
+        if (!(await enter('ACTIVITY_READ'))) return;
         prev = refresh();
         await sleep(50);
         continue;
       }
-      return finish(false, pick.kind, describePick(pick, need));
+      // 偏好的場次狀態看不出來：不猜、不當成還沒開放一直重看，停下來問你
+      if (plan.kind === 'unknown') return finish(false, 'status-unknown', plan.msg, { handOff: true });
+      return finish(false, plan.kind, describePick(plan, req.need));
     }
   }
 
+  /** 選票頁：選票區（有分區時）→ 對票種與預算 → 選張數 → 送出選購 */
   async function onSelect(d) {
     const cfg = d.cfg || {};
+    const req = requirementOf(cfg);
+    if (!(await enter('TICKET_AREA_SELECTION'))) return;
     const info = SITE.selectInfo();
+    // 這個場次已經保留過名額（例如重新整理、按上一頁回來）：不重送，直接到下一步
+    if (doneStep('hold') && (!state.wf.done.hold.slotId || state.wf.done.hold.slotId === info.slotId)) {
+      log('這個場次已經保留過名額，不再送一次選購，直接到下一步', 'warn');
+      location.assign(SITE.nextUrl('select'));
+      return;
+    }
     if (info.status === 'full' || info.status === 'not-open') {
       if (info.status === 'full' && info.slotId) await call('skip-slot', { slotId: info.slotId }, 1500);
       log(`「${info.text}」${info.status === 'full' ? '已額滿' : '還沒開放'}，回時段列表`, 'warn');
@@ -1060,39 +1353,80 @@
     }
     const types = SITE.ticketTypes();
     if (!types.length) return finish(false, 'no-types', '選票頁上找不到票種，先停下來', { handOff: true });
-    const plan = planTickets(types, cfg.tickets, SITE.maxPerOrder());
-    if (!plan.ok) return finish(false, 'tickets', plan.msg, { handOff: true });
+    const maxPerOrder = SITE.maxPerOrder();
+    let area = null;
+    const areas = SITE.areas();
+    if (areas.length) {
+      const skip = ((state.wf && state.wf.skipAreas) || {})[info.slotId] || [];
+      const ap = planArea(areas, req, types, { skip, maxPerOrder });
+      await notePlan('TICKET_AREA_SELECTION', briefPlan('area', ap));
+      if (ap.kind !== 'ok') return finish(false, 'area-none', `${ap.msg}。不會送出選購`);
+      area = ap.area;
+      if (!(await allowed('select-area'))) return;
+      if (!SITE.chooseArea(area)) return finish(false, 'fill-failed', `選不了「${area.name}」，先停下來`, { handOff: true });
+      log(ap.msg, 'ok');
+    }
+    const t = matchTickets(req, types, { surcharge: area ? area.surcharge || 0 : 0, maxPerOrder });
+    if (!t.ok) {
+      if (t.kind === 'budget') return finish(false, 'budget', `${t.msg}。沒有符合預算的選擇，不會送出選購`);
+      return finish(false, 'tickets', t.msg, { handOff: true });
+    }
+    const plan = t.plan;
+    const selection = {
+      slotId: info.slotId, sessionText: selectionNow().sessionText || info.text,
+      areaId: area ? area.id : null, areaName: area ? area.name : null,
+      items: plan.plan.map((p) => ({ name: p.name, qty: p.qty })), amount: plan.amount,
+    };
+    if (!(await enter('QUANTITY_SELECTION', { selection }))) return;
+    if (!(await allowed('set-quantity'))) return;
     for (const p of plan.plan) SITE.setQty(p.id, p.qty);
     const bad = plan.plan.find((p) => SITE.qtyOf(p.id) !== p.qty);
     if (bad) return finish(false, 'fill-failed', `「${bad.name}」的張數填不進去，先停下來`, { handOff: true });
     log(`張數：${plan.plan.map((p) => `${p.name} ${p.qty}`).join('、')}，共 ${plan.total} 張、NT$${plan.amount}`);
-    return submitOnce('select', d, info.slotId);
+    return submitOnce('select', d, info.slotId, area);
   }
 
+  /** 購票人資料頁：到這裡代表選購已經保留了；填你提供的資料 → 勾同意（照你的設定）→ 送出 */
   async function onInfo(d) {
     const cfg = d.cfg || {};
+    if (!(await enter('BUYER_INFO', { done: 'hold' }))) return;
+    if (doneStep('buyer')) {
+      log('購票人資料已經送出過，不再送一次，直接到下一步', 'warn');
+      location.assign(SITE.nextUrl('info'));
+      return;
+    }
     const chk = checkProfile(cfg.profile);
     if (!chk.ok) return finish(false, 'profile', `購票人資料不完整（${describeProfileProblem(chk)}），請在擴充功能補上後按「繼續」`, { handOff: true });
+    if (!(await allowed('fill-profile'))) return;
     const r = SITE.fillProfile(chk.profile);
     if (r.missing.length) return finish(false, 'fill-failed', `這些欄位找不到或填不進去：${r.missing.join('、')}，先停下來`, { handOff: true });
     if (SITE.hasAgree()) {
-      if (cfg.autoAgree === false) return finish(false, 'agree', '資料已填好。你設定不自動勾選同意，請自己閱讀並勾選後按「下一步」', { handOff: true });
+      const ok = await allowed('agree-terms', () => finish(false, 'agree', '資料已填好。你設定不自動勾選同意，請自己閱讀並勾選後按「下一步」', { handOff: true }));
+      if (!ok) return;
       if (!SITE.setAgree(true)) return finish(false, 'agree-failed', '同意使用須知勾不起來，先停下來', { handOff: true });
     }
     log(`已填購票人資料：${maskText(`${chk.profile.name.slice(0, 1)}** ${chk.profile.phone} ${chk.profile.email}`)}${SITE.hasAgree() ? '，已勾選同意' : ''}`);
     return submitOnce('info', d, null);
   }
 
-  /** 確認頁：只檢查、標出按鈕、提醒你，絕不替你按 */
+  /**
+   * 確認頁：核對訂單（ORDER_REVIEW），一致才交接付款（PAYMENT_HANDOFF）。只讀、標出按鈕、提醒你，絕不替你按：
+   * 「確認建立訂單」在操作政策裡是 CONFIRMATION_REQUIRED（不可逆），付款是 BLOCKED。
+   */
   async function onConfirm(d, alreadyReported = false) {
     const g = SITE.confirmGates();
-    const btn = SITE.confirmButton();
-    if (btn) { btn.style.outline = '3px solid #d97706'; btn.style.outlineOffset = '3px'; }
     const left = SITE.holdLeft();
     const extra = [g.captcha && '輸入驗證碼', g.botcheck && '自己完成「我不是機器人」檢查'].filter(Boolean);
     const msg = `已到確認頁${left != null ? `，名額保留中（約剩 ${left} 秒）` : ''}。請檢查訂單內容${extra.length ? '，' + extra.join('、') : ''}，再自己按「確認建立訂單」`;
-    if (!alreadyReported) await finish(true, 'ready', msg, { handOff: true });
-    else setStatus(msg, 'warn');
+    if (alreadyReported) { setStatus(msg, 'warn'); watchHold(); return; }
+    if (!(await enter('ORDER_REVIEW', { done: 'buyer' }))) return;
+    const summary = SITE.orderSummary();
+    const sel = selectionNow();
+    const review = reviewOrder(summary, { sessionText: sel.sessionText, areaName: sel.areaName, items: sel.items || [], amount: sel.amount });
+    if (!review.ok) return finish(false, 'review-mismatch', `${review.msg}。助手不交接付款，先停下來請你確認`, { handOff: true, summary });
+    const btn = SITE.confirmButton();
+    if (btn) { btn.style.outline = '3px solid #d97706'; btn.style.outlineOffset = '3px'; }
+    await finish(true, 'ready', msg, { handOff: true, summary });
     watchHold();
   }
 
@@ -1125,12 +1459,15 @@
     if (action !== 'rate-limit' && action !== 'gate' && await rateSeenSince(pageStart())) action = 'rate-limit';
     if (action === 'rate-limit') {
       if (!(await rateWait(what))) return;
+      if (!(await allowed('reload-page'))) return;
       location.reload();
       return;
     }
+    if (action === 'login') return finish(false, 'login-required', `${what}。網站要你重新登入，助手先停下來`, { handOff: true });
     if (action === 'retry') {
       const r = await grant('load', what, e.status);
       if (!r) return finish(false, 'load-limit', `${what}，一直沒有恢復，先停下來`, { handOff: true });
+      if (!(await allowed('reload-page'))) return;
       location.reload();
       return;
     }
@@ -1147,13 +1484,16 @@
     if (state.running) return;
     state.running = true;
     state.aborted = false;
+    if (d && d.wf) state.wf = d.wf;
     panel();
     setCountdown(null);
     try {
       await domReady();
-      switch (SITE.pageKind()) {
+      const kind = SITE.pageKind();
+      if (!(await enter('PAGE_DETECTION', { reason: `頁面：${kind}` }))) return;
+      switch (kind) {
         case 'list': setStatus('讀取時段狀態…', 'ok'); return await onList(d);
-        case 'select': setStatus('選擇票種與張數…', 'ok'); return await onSelect(d);
+        case 'select': setStatus('選擇票區、票種與張數…', 'ok'); return await onSelect(d);
         case 'info': setStatus('填寫購票人資料…', 'ok'); return await onInfo(d);
         case 'confirm': return await onConfirm(d);
         case 'queue': return await onQueue(d);
@@ -1273,10 +1613,16 @@
 
   function onCommand(c) {
     if (c.cmd === 'abort') { stopLocal(c.reason || '已取消'); return; }
+    if (c.cmd === 'pause') {
+      // 暫停：手上這一個檢查做完就停，不再做新的操作（之後每一步的報到與 PolicyGate 也都會拒絕）
+      state.aborted = true;
+      if (state.panel) { setStatus('已暫停：到擴充功能按「繼續」，從這一頁接著做', 'warn'); setCountdown(null); }
+      return;
+    }
     if (c.cmd === 'run') {
       state.aborted = false;
       state.mode = 'run';
-      runFlow({ cfg: c.cfg || {}, since: c.since, skip: c.skip || [] });
+      runFlow({ cfg: c.cfg || {}, since: c.since, skip: c.skip || [], wf: c.wf || null });
     }
   }
   /* ───────────────────────── 黑盒子 ─────────────────────────
@@ -1311,6 +1657,7 @@
       case 'health': return runHealth(d);
       case 'success': return showSuccess(d);
       case 'confirm-wait': panel(); return onConfirm(d, true);   // 已經交給你了：重新整理確認頁時繼續提醒保留時間
+      case 'paused': panel(); setStatus('已暫停：到擴充功能按「繼續」，從這一頁接著做', 'warn'); return undefined;
       default: return undefined;
     }
   }
