@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { parseDateTime, sessionStatus, parseSessionNote, parseSaleTimes, parsePrices, parseLimits, buildEventInfo, sanitizeInfo } from '../../lib/eventinfo.js';
-import { ibonActivityUrl, infoSiteOf, siteOf } from '../../lib/sites.js';
+import { activityUrl, eventSlug, pageKindOf, offTrackKind } from '../../lib/urls.js';
 
 test('日期時間：各種寫法；只看日期後面一小段的時間', () => {
   assert.deepEqual(parseDateTime('2026/11/14(六) 15:30 '), { date: '2026-11-14', time: '15:30' });
@@ -128,11 +128,11 @@ test('頁面交回來的資訊先過濾：只留認得的欄位，長度與數�
 });
 
 test('ibon 活動頁網址：只認活動頁；不屬於任何能自動選購的網站', () => {
-  assert.equal(ibonActivityUrl('https://ticket.ibon.com.tw/ActivityInfo/Details/39972'), 'https://ticket.ibon.com.tw/ActivityInfo/Details/39972');
-  assert.equal(ibonActivityUrl(' https://ticket.ibon.com.tw/ActivityInfo/Details/39972/?x=1 '), 'https://ticket.ibon.com.tw/ActivityInfo/Details/39972');
-  assert.equal(ibonActivityUrl('http://ticket.ibon.com.tw/ActivityInfo/Details/39972'), null);
-  assert.equal(ibonActivityUrl('https://orders.ibon.com.tw/application/UTK02/UTK0201_000.aspx'), null);
-  assert.equal(ibonActivityUrl('https://ticket.ibon.com.tw.example.com/ActivityInfo/Details/1'), null);
-  assert.equal(infoSiteOf('https://ticket.ibon.com.tw/ActivityInfo/Details/39972'), 'ibon');
-  assert.equal(siteOf('https://ticket.ibon.com.tw/ActivityInfo/Details/39972'), null);   // 排程、立即執行、檢查時段都不收
+  assert.equal(activityUrl('https://ticket.ibon.com.tw/ActivityInfo/Details/39972'), 'https://ticket.ibon.com.tw/ActivityInfo/Details/39972');
+  assert.equal(activityUrl(' https://ticket.ibon.com.tw/ActivityInfo/Details/39972/?x=1 '), 'https://ticket.ibon.com.tw/ActivityInfo/Details/39972');
+  assert.equal(activityUrl('http://ticket.ibon.com.tw/ActivityInfo/Details/39972'), null);
+  assert.equal(activityUrl('https://orders.ibon.com.tw/application/UTK02/UTK0201_000.aspx'), null);
+  assert.equal(activityUrl('https://ticket.ibon.com.tw.example.com/ActivityInfo/Details/1'), null);
+  assert.equal(eventSlug('https://ticket.ibon.com.tw/ActivityInfo/Details/39972'), '39972');
+  assert.equal(pageKindOf('https://ticket.ibon.com.tw/ActivityInfo/Details/39972'), 'event');
 });

@@ -93,3 +93,90 @@
     };
   }
 
+
+  /* ───────────────────────── 登入、頁面狀態 ───────────────────────── */
+
+  /** 登入狀態：頁首看得到「快速登入」＝沒登入；購票流程頁看得到「登出」＝已登入（2026-10-16 真站快照）；其他看不出來 */
+  function loginState() {
+    const link = deepAll('a, button').find((el) => norm(el.textContent) === '快速登入' && isVisible(el));
+    if (link) return 'logged-out';
+    if (deepAll('a, button').some((el) => norm(el.textContent) === '登出' && isVisible(el))) return 'logged-in';
+    return 'unknown';
+  }
+
+  /** 看得到的文字，連同 Shadow DOM（包括封閉的）裡的文字；innerText 本身不會進到 Shadow DOM */
+  function visibleText() {
+    const parts = [document.body ? document.body.innerText : ''];
+    for (const host of deepAll('*')) {
+      const sr = shadowOf(host);
+      if (sr) for (const c of sr.children) if (c.innerText) parts.push(c.innerText);
+    }
+    return parts.join('\n');
+  }
+
+  /** 排隊、流量控管、機器人檢查的字樣（只辨識有沒有，不處理） */
+  function blockerText() {
+    const m = visibleText().match(/流量控管|排隊|請稍候|機器人|驗證碼|Just a moment/i);
+    return m ? m[0] : null;
+  }
+
+  const SOLD_OUT = /已售完|售完|已額滿|額滿|暫無|無法購買/;
+
+  /* ───────────────────────── 選票區頁（UTK0201_000，第 2 步） ─────────────────────────
+   * 截圖看過：表格，欄位「顏色、票區、票價(NT$)、空位」，空位寫「熱賣中」。網頁結構還沒核對：
+   * 列裡有連結就點連結，沒有就點整列。 */
+  function areaRows() {
+    return deepAll('tbody tr').filter((r) => isVisible(r) && $$('td', r).length >= 2 && /NT|\d/.test(norm(r.textContent)));
+  }
+  const areaRowText = (r) => norm($$('td', r).map((td) => td.textContent).join(' '));
+
+  /* ───────────────────────── 座位/數量頁（UTK0202_，第 3 步，2026-10-16 真站快照） ─────────────────────────
+   * 「票區價格」下拉（#ctl00_ContentPlaceHolder1_PRICE，多票區才有），再有「購買數量」表格（#…_DataGrid）。
+   * 選了票區價格，ibon 會回傳重畫整頁；「下一步」是 #ctl00_ContentPlaceHolder1_AddShopingCart。 */
+  const QTY = {
+    price: '#ctl00_ContentPlaceHolder1_PRICE',
+    grid: '#ctl00_ContentPlaceHolder1_DataGrid',
+    next: '#ctl00_ContentPlaceHolder1_AddShopingCart',
+    captcha: '#ctl00_ContentPlaceHolder1_CHK, input[id*="CHK"]',
+  };
+  const qtyPrice = () => { const s = $(QTY.price); return s && isVisible(s) ? s : null; };
+  const qtySelects = () => {
+    const grid = $(QTY.grid) || $('table.rwdtable');
+    return grid ? deepAll('select.form-control-sm', grid).filter(isVisible) : [];
+  };
+  const qtyNext = () => $(QTY.next) || $('a[id*="AddShopingCart"]')
+    || deepAll('a.btn.btn-primary.btn-block').find((b) => isVisible(b) && /下一步/.test(b.textContent)) || null;
+  const qtyCaptcha = () => deepAll(QTY.captcha).find(isVisible) || null;
+
+  /**
+   * 點元素。href 是 javascript: 的連結（ibon 的「下一步」）在擴充功能的環境裡點會被擴充功能自己的 CSP 擋掉，
+   * 所以標記起來，請 MAIN world 的 alert-hook.js 在頁面自己的環境代點（跟你手動按一樣）。
+   * 它沒回應（沒載入）就不得已自己點。
+   */
+  function pageClick(el) {
+    const href = el.tagName === 'A' ? (el.getAttribute('href') || '') : '';
+    if (!/^\s*javascript:/i.test(href)) { el.click(); return; }
+    const token = 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    el.setAttribute('data-ith-click', token);
+    window.postMessage({ __ith: 'click', token }, location.origin);
+    setTimeout(() => { if (el.getAttribute('data-ith-click') === token) { el.removeAttribute('data-ith-click'); el.click(); } }, 500);
+  }
+
+  /** 在下拉裡設值並通知網頁（ASP.NET 的 onchange 會跟著動） */
+  function setSelect(sel, value) {
+    sel.value = String(value);
+    sel.dispatchEvent(new Event('input', { bubbles: true }));
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
+    return sel.value === String(value);
+  }
+
+  /* ───────────────────────── 填購票資訊頁（UTK0206_，第 4 步，2026-10-16 真站快照） ───────────────────────── */
+  const buyerAgree = () => $$('input[type=checkbox]').find((c) => {
+    const l = c.id ? $(`label[for="${CSS.escape(c.id)}"]`) : null;
+    return l && /同意/.test(l.textContent);
+  }) || null;
+  const buyerNext = () => deepAll('a, button').find((b) => isVisible(b) && /^下一步/.test(norm(b.textContent))) || null;
+  const buyerCountdown = () => {
+    const t = $$('span').filter(isVisible).map((el) => norm(el.textContent)).find((x) => /^剩餘時間\s*\d{1,2}\s*[:：]\s*\d{2}$/.test(x));
+    return t || null;
+  };

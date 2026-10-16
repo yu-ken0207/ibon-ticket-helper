@@ -5,7 +5,7 @@
   "scripts": {
     "build": "node tools/build.mjs",
     "check": "node tools/build.mjs --check",
-    "unit": "node --test 'test/unit/*.test.mjs'",
-    "test": "node tools/build.mjs --check && node --test 'test/unit/*.test.mjs' && node test/run-tests.mjs"
+    "unit": "node --test 'test/unit/*.test.mjs' test/background.test.mjs",
+    "test": "node tools/build.mjs --check && node --test 'test/unit/*.test.mjs' test/background.test.mjs test/agent.test.mjs"
   }
 }
