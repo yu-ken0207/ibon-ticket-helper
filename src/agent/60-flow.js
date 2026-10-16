@@ -67,10 +67,13 @@
   }
 
   /** 按下去之後等結果：網站用 alert 回報就接到；換頁成功時這個頁面已經卸載，由新頁面接手 */
-  async function watchAfterClick(alertBefore, maxMs = 8000) {
+  async function watchAfterClick(alertBefore, maxMs = 45000, label = '處理中') {
     const t0 = Date.now();
+    let shown = 0;
     while (Date.now() - t0 < maxMs && !state.aborted) {
       if (state.alerts.length > alertBefore) return { kind: 'alert', msg: state.alerts[state.alerts.length - 1] };
+      const sec = Math.floor((Date.now() - t0) / 1000);
+      if (sec >= 3 && sec !== shown) { shown = sec; setStatus(`ibon ${label}，已等 ${sec} 秒…先不要重新整理`, 'ok'); }
       await sleep(200);
     }
     return { kind: 'timeout' };
@@ -188,9 +191,9 @@
     log(`場次「${sessionKey(cfg.sessionWhen)}」可以買了，按下「${info.button}」`);
     setStatus('按下線上購票…', 'ok');
     btn.click();
-    const out = await watchAfterClick(before, 6000);
+    const out = await watchAfterClick(before, 20000, '正在進入購票流程');
     if (out.kind === 'alert') return handleAlert(out, '按下線上購票');
-    if (out.kind === 'timeout') return retry('fail', '按下線上購票後頁面沒有反應');
+    if (out.kind === 'timeout') return retry('fail', '按下線上購票後 20 秒頁面沒有反應');
     return undefined;
   }
 
@@ -220,9 +223,9 @@
     const row = rows[pick.index];
     const before = state.alerts.length;
     (row.querySelector('a[href], a[onclick]') || row).click();
-    const out = await watchAfterClick(before, 8000);
+    const out = await watchAfterClick(before, 30000, '正在處理票區');
     if (out.kind === 'alert') return handleAlert(out, '選票區');
-    if (out.kind === 'timeout') return finish(false, 'no-advance', '選了票區但頁面沒有進到下一步，請自己看畫面', { handOff: true });
+    if (out.kind === 'timeout') return finish(false, 'no-advance', '選了票區但等了 30 秒頁面沒有進到下一步，請自己看畫面', { handOff: true });
     return undefined;
   }
 
@@ -267,9 +270,9 @@
     next.click();
     log('按下「下一步」');
     setStatus('已按下一步…', 'ok');
-    const out = await watchAfterClick(before, 8000);
+    const out = await watchAfterClick(before, 45000, '正在處理（可能在排隊或配位）');
     if (out.kind === 'alert') return handleAlert(out, '按下一步');
-    if (out.kind === 'timeout') return finish(false, 'timeout', '按下一步後頁面一直沒有反應，請自己看畫面', { handOff: true });
+    if (out.kind === 'timeout') return finish(false, 'timeout', '按下一步後等了 45 秒頁面還是沒有反應，請看畫面，先不要重新整理', { handOff: true });
     return undefined;
   }
 
@@ -293,9 +296,9 @@
     const before = state.alerts.length;
     next.click();
     log('按下「下一步」');
-    const out = await watchAfterClick(before, 8000);
+    const out = await watchAfterClick(before, 45000, '正在處理');
     if (out.kind === 'alert') return handleAlert(out, '按下一步');
-    if (out.kind === 'timeout') return finish(false, 'timeout', '按下一步後頁面一直沒有反應，請自己看畫面', { handOff: true });
+    if (out.kind === 'timeout') return finish(false, 'timeout', '按下一步後等了 45 秒頁面還是沒有反應，請看畫面，先不要重新整理', { handOff: true });
     return undefined;
   }
 

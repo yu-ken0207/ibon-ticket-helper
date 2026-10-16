@@ -99,7 +99,8 @@
     });
   }
 
-  chrome.runtime.onMessage.addListener((msg) => {
+  chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+    if (msg && msg.cmd === 'ping') { sendResponse({ ok: true, kind: pageKind() }); return; }   // 背景程式問「助手還在不在」
     if (msg && msg.cmd) onCommand(msg);
   });
 

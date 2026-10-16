@@ -64,7 +64,8 @@ async function run({ url, html, directive, extra = {}, wait = 1500, alertAfter =
     const __roots = new WeakMap();
     const __attach = Element.prototype.attachShadow;
     Element.prototype.attachShadow = function (init) { const r = __attach.call(this, init); __roots.set(this, r); return r; };
-    window.chrome = { runtime: { id: 'x', lastError: null, onMessage: { addListener() {} },
+    window.__listeners = [];
+    window.chrome = { runtime: { id: 'x', lastError: null, onMessage: { addListener(fn) { window.__listeners.push(fn); } },
       sendMessage: (msg, cb) => { window.__bg(msg.type, msg.payload).then((r) => cb && cb(r)); } },
       dom: { openOrClosedShadowRoot: (el) => __roots.get(el) || null } };`);
   await page.addInitScript(AGENT);
@@ -217,4 +218,21 @@ test('沒有任務（idle）：什麼都不做', { skip }, async () => {
   const r = await run({ url: U.event, html: ACTIVITY.replace('<button class="btn-buy">線上購票</button>', '<button class="btn-buy" onclick="document.title=\'clicked\'">線上購票</button>'), directive: { mode: 'idle' } });
   assert.notEqual(r.title, 'clicked');
   assert.deepEqual(kinds(r).filter((t) => t !== 'hello'), []);
+});
+
+test('背景程式問「助手還在不在」（ping）：活動頁載入狀態再變一次也不會被誤判成錯誤頁', { skip }, async () => {
+  const r = await run({ url: U.event, html: ACTIVITY, directive: { mode: 'idle' } });
+  const reply = await r.page.evaluate(() => new Promise((resolve) => {
+    let got = null;
+    for (const fn of window.__listeners) fn({ cmd: 'ping' }, {}, (x) => { got = x; });
+    resolve(got);
+  }));
+  assert.deepEqual(reply, { ok: true, kind: 'event' });
+});
+
+test('按下一步後 ibon 處理得慢：等到 45 秒才算沒反應，中間顯示「已等 N 秒」，不重新整理', { skip }, async () => {
+  const r = await run({ url: U.qty, html: qtyPage({ priceSelected: true }), directive: RUN({ qty: 1 }), wait: 5200 });
+  assert.equal(r.title, 'NEXT q=1');
+  assert.ok(!r.calls.some((c) => c.type === 'result'), '5 秒時還不能判定失敗');
+  assert.ok(!r.calls.some((c) => c.type === 'retry'));
 });

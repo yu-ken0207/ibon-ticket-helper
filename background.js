@@ -567,9 +567,18 @@ async function onOffTrack(tabId, kind, url) {
   await recoverTab(tabId, 'ibon 回了錯誤頁', 'navigate');
 }
 
+/** 問頁面上的助手還在不在：活動頁是單頁應用，網址或載入狀態會變但頁面沒有真的重新載入，助手不會再報到一次 */
+async function agentAlive(tabId) {
+  try {
+    const r = await Promise.race([chrome.tabs.sendMessage(tabId, { cmd: 'ping' }), new Promise((res) => setTimeout(() => res(null), 1200))]);
+    return !!(r && r.ok);
+  } catch (_) { return false; }
+}
+
 async function checkAgent(tabId, loadingAt) {
   const rec = tabLoads.get(tabId);
   if (!rec || rec.loadingAt !== loadingAt || rec.helloAt >= loadingAt) return;   // 助手報到了，或已經是下一次載入
+  if (await agentAlive(tabId)) { noteHello(tabId); return; }                     // 助手還在，只是沒有再報到
   let tab;
   try { tab = await chrome.tabs.get(tabId); } catch (_) { return; }
   const kind = pageKindOf(tab.url || '');
