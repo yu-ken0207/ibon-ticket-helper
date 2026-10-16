@@ -38,7 +38,7 @@ test('黑盒子：只留認得的欄位並限制長度', () => {
   const b = sanitizeBox({ kind: 'x'.repeat(100), msg: 'm', buttons: new Array(50).fill('b'), evil: '<script>', text: 't'.repeat(5000) });
   assert.equal(b.kind.length, 40);
   assert.equal(b.buttons.length, 15);
-  assert.equal(b.text.length, 800);
+  assert.equal(b.text.length, 2000);
   assert.equal('evil' in b, false);
   assert.ok(BLACKBOX_MAX >= 10);
 });

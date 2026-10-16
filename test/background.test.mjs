@@ -197,7 +197,7 @@ test('黑盒子與紀錄：只收任務分頁送的，欄位整理過', async ()
   const tab = task().tabId;
   await page(tab, 'blackbox', { kind: 'no-match', msg: 'x', text: 't'.repeat(5000), evil: 1 });
   assert.equal(store.blackbox.length, 1);
-  assert.equal(store.blackbox[0].text.length, 800);
+  assert.equal(store.blackbox[0].text.length, 2000);
   assert.equal('evil' in store.blackbox[0], false);
   assert.equal((await page(777, 'blackbox', { kind: 'x' })).ok, false);
   const st = await popup('status');

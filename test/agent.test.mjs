@@ -301,3 +301,29 @@ test('活動頁開賣後一載入就先建連線', { skip }, async () => {
   const r = await run({ url: U.event, html: ACTIVITY, directive: RUN({ sessionWhen: '2026/12/06 18:00' }), wait: 1000 });
   assert.equal(await r.page.evaluate(() => document.querySelectorAll('link[rel="preconnect"][data-ith]').length), 1);
 });
+
+// 活動 39978（2026-10-16）：購票方式「自行選位 電腦配位」、點了票區 30 秒沒反應
+const SEATMODE = (handlerOnSpan = false) => `<div id="ticket-info"><div><span>購票方式：</span>
+  <label><input type="radio" name="mode" id="m1" checked>自行選位</label><label><input type="radio" name="mode" id="m2">電腦配位</label></div></div>
+  <table><tbody><tr ${handlerOnSpan ? '' : 'onclick="go()"'}><td>■</td><td><span ${handlerOnSpan ? 'onclick="go()"' : ''}>2樓2B區5880</span></td><td>5,880</td><td>11</td></tr></tbody></table>
+  <script>function go(){ document.title = document.getElementById('m2').checked ? 'row-auto' : 'seatmap'; }</script>`;
+
+test('票區頁：購票方式可以選自行選位／電腦配位 → 先選電腦配位再點票區', { skip }, async () => {
+  const r = await run({ url: U.area, html: SEATMODE(), directive: RUN({ keywords: ['2B區'] }), wait: 2000 });
+  assert.equal(r.title, 'row-auto');
+  assert.ok(r.calls.some((c) => c.type === 'log' && /改選「電腦配位」/.test(c.payload.msg)));
+});
+
+test('票區頁：點擊處理掛在列裡面的元素上 → 照 tickets_hunter 點列中央那一點，還是點得到', { skip }, async () => {
+  const r = await run({ url: U.area, html: SEATMODE(true), directive: RUN({ keywords: ['2B區'] }), wait: 2000 });
+  assert.equal(r.title, 'row-auto');
+});
+
+test('黑盒子：連 Shadow DOM 的字一起記，並記下購票方式與票區列的結構', { skip }, async () => {
+  const r = await run({ url: U.area, html: SEATMODE(), directive: RUN({ keywords: ['貴賓'] }), wait: 1500 });
+  const box = r.calls.find((c) => c.type === 'blackbox').payload;
+  assert.match(box.html, /購票方式：/);
+  assert.match(box.html, /票區列：<tr onclick="go\(\)">/);
+  assert.match(box.html, /<input id="m1" type="radio" name="mode" checked>/);
+  assert.doesNotMatch(box.html, /<body|ibon 訂票助手/);
+});

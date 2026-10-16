@@ -28,6 +28,43 @@
     return { text: `${name} ${price} ${seat}`, name, price, seat, left, unavailable };
   }
 
+  /** 這個元素看起來是不是「已選」：radio 勾了，或 class / aria 標了選取 */
+  const looksSelected = (el) => !!(el.checked || el.getAttribute('aria-checked') === 'true' || el.getAttribute('aria-selected') === 'true'
+    || /(^|\s)(active|selected|checked|on|current)(\s|$)/i.test(el.className || ''));
+
+  /** radio 的說明文字：<label for>、包著它的 <label>、或緊接在後面的字 */
+  function radioLabel(input) {
+    const byFor = input.id ? deepAll(`label[for="${CSS.escape(input.id)}"]`)[0] : null;
+    const wrap = input.closest ? input.closest('label') : null;
+    const next = input.nextElementSibling || (input.parentElement && input.parentElement.nextElementSibling);
+    return norm((byFor || wrap || next || {}).textContent || '');
+  }
+
+  /**
+   * 購票方式可以選「自行選位」或「電腦配位」時（2026-10-16 活動 39978：「購票方式： 自行選位 電腦配位」），先選電腦配位：
+   * 助手的流程是選張數讓 ibon 配位，不會替你點座位圖。只點看起來點得動的（radio、label、按鈕、連結、滑鼠會變手指的），純文字不動。
+   * 回傳 'selected' 選了、'already' 本來就是、null 找不到可以點的。
+   */
+  async function chooseComputerSeat() {
+    for (const input of deepAll('input[type="radio"]')) {
+      if (!/電腦配位/.test(radioLabel(input))) continue;
+      if (input.checked) return 'already';
+      const target = isVisible(input) ? input : (input.id && deepAll(`label[for="${CSS.escape(input.id)}"]`)[0]) || input.closest('label') || input;
+      pageClick(target);
+      await settle(150, 3000, 150);
+      return 'selected';
+    }
+    const clickable = deepAll('button, a, label, [role="radio"], [role="tab"], [onclick], .btn, li, span, div').filter((el) => isVisible(el)
+      && norm(el.textContent) === '電腦配位' && (/^(BUTTON|A|LABEL)$/.test(el.tagName) || el.hasAttribute('onclick') || el.getAttribute('role')
+        || /(^|\s)btn(\s|$)/.test(el.className || '') || getComputedStyle(el).cursor === 'pointer'));
+    const el = clickable[clickable.length - 1];   // 最裡層的那一個
+    if (!el) return null;
+    if (looksSelected(el)) return 'already';
+    pointClick(el);
+    await settle(150, 3000, 150);
+    return 'selected';
+  }
+
   /** 選票區頁：照關鍵字、排除字選票區；之前售完過的票區（d.failedAreas）跳過 */
   async function runArea(cfg, d = {}) {
     setStatus('選票區中…', 'ok');
@@ -68,10 +105,22 @@
     }
     if (pick.kind === 'fallback') log(`關鍵字都沒比對到，照遞補設定改選第一個還能買的：${pick.text}`, 'warn');
     else log(`選中票區：${pick.text}（${pageAge()}）`);
+    const pageText = visibleText();
+    if (/自行選位/.test(pageText) && /電腦配位/.test(pageText)) {
+      const how = await chooseComputerSeat();
+      if (state.aborted || state.leaving) return undefined;
+      if (how === 'selected') log('購票方式改選「電腦配位」（助手不會替你點座位圖）');
+      else if (!how) log('頁面有「自行選位」和「電腦配位」，但找不到可以點的電腦配位選項，照原本的方式選票區', 'warn');
+    }
     const row = rows[pick.index];
-    const out = await clickAndWatch(row.querySelector('a[href], a[onclick]') || row, 30000, '正在處理票區');
+    const out = await clickAndWatch(row, 30000, '正在處理票區', pointClick);
     if (out.kind === 'alert') return handleAlert(out, '選票區', { areaText: infos[pick.index].name });
-    if (out.kind === 'timeout') return finish(false, 'no-advance', '選了票區但等了 30 秒頁面沒有進到下一步，請自己看畫面', { handOff: true });
+    if (out.kind === 'timeout') {
+      const seatMap = /選擇座位|座位圖|請點選座位|請選擇您的座位|已選座位/.test(visibleText());
+      return finish(false, 'no-advance', seatMap
+        ? '點了票區之後 ibon 出現座位圖，要你自己點座位（助手不會替你選座位）。請直接在畫面上選'
+        : '選了票區但等了 30 秒頁面沒有進到下一步，請自己看畫面', { handOff: true });
+    }
     return undefined;
   }
 

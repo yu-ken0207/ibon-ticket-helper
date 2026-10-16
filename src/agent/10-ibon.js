@@ -144,6 +144,36 @@
   }
 
   /**
+   * 照 tickets_hunter 的做法點元素：捲到畫面中間，點「它正中央那一點上最裡層的元素」，事件從那裡一路往外傳。
+   * 直接對 <tr> 呼叫 click()，事件只發給 <tr> 本身；ibon 如果把處理掛在列裡面的元素上，就等於沒點到
+   * （2026-10-16 活動 39978：點了票區 30 秒都沒反應）。點到的是連結就交給 pageClick（javascript: 連結要在頁面環境點）。
+   * 回傳實際點到的元素。
+   */
+  function pointClick(el) {
+    try { el.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch (_) { /* 捲不動就照目前位置 */ }
+    const r = el.getBoundingClientRect();
+    const x = r.left + r.width / 2;
+    const y = r.top + r.height / 2;
+    const root = el.getRootNode ? el.getRootNode() : document;
+    let target = null;
+    try { target = root.elementFromPoint ? root.elementFromPoint(x, y) : document.elementFromPoint(x, y); } catch (_) { target = null; }
+    if (!target || !(target === el || el.contains(target))) target = el;   // 被別的東西蓋住、或在畫面外：還是點它本身
+    const link = target.closest ? target.closest('a') : null;
+    if (link && el.contains(link)) { pageClick(link); return link; }
+    const opts = { bubbles: true, cancelable: true, composed: true, view: window, clientX: x, clientY: y, button: 0, buttons: 1 };
+    try {
+      target.dispatchEvent(new PointerEvent('pointerdown', { ...opts, pointerType: 'mouse', isPrimary: true }));
+      target.dispatchEvent(new MouseEvent('mousedown', opts));
+      target.dispatchEvent(new PointerEvent('pointerup', { ...opts, buttons: 0, pointerType: 'mouse', isPrimary: true }));
+      target.dispatchEvent(new MouseEvent('mouseup', { ...opts, buttons: 0 }));
+      target.dispatchEvent(new MouseEvent('click', { ...opts, buttons: 0 }));
+    } catch (_) {
+      target.click();
+    }
+    return target;
+  }
+
+  /**
    * 先跟購票網站建好連線（DNS、TCP、TLS）：開賣後從活動頁跳到 orders.ibon.com.tw 時，第一次連線不用再握手。
    * 只是給瀏覽器的提示（<link rel="preconnect">），不送任何請求內容。Chrome 閒置的預先連線大約十秒會關掉，
    * 所以在開賣前幾秒、和開賣後活動頁一載入時各加一次。

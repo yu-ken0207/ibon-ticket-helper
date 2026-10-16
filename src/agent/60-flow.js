@@ -160,10 +160,10 @@
    * 按下去並等結果。等的這段時間請 alert-hook.js 接管對話框：alert 不跳出來（不然頁面會停住、要你按確定），
    * 照 kktix 助手「只在等結果的那幾秒接管」的做法，等完就交還。換頁成功時這個頁面已經卸載，新頁面一開始就不接管。
    */
-  async function clickAndWatch(el, maxMs, label) {
+  async function clickAndWatch(el, maxMs, label, clicker = pageClick) {
     const before = state.alerts.length;
     window.postMessage({ __ith: 'catch', ms: maxMs + 2000 }, location.origin);
-    pageClick(el);
+    clicker(el);
     try {
       return await watchAfterClick(before, maxMs, label);
     } finally {

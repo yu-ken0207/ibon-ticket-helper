@@ -749,6 +749,36 @@
   }
 
   /**
+   * 照 tickets_hunter 的做法點元素：捲到畫面中間，點「它正中央那一點上最裡層的元素」，事件從那裡一路往外傳。
+   * 直接對 <tr> 呼叫 click()，事件只發給 <tr> 本身；ibon 如果把處理掛在列裡面的元素上，就等於沒點到
+   * （2026-10-16 活動 39978：點了票區 30 秒都沒反應）。點到的是連結就交給 pageClick（javascript: 連結要在頁面環境點）。
+   * 回傳實際點到的元素。
+   */
+  function pointClick(el) {
+    try { el.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch (_) { /* 捲不動就照目前位置 */ }
+    const r = el.getBoundingClientRect();
+    const x = r.left + r.width / 2;
+    const y = r.top + r.height / 2;
+    const root = el.getRootNode ? el.getRootNode() : document;
+    let target = null;
+    try { target = root.elementFromPoint ? root.elementFromPoint(x, y) : document.elementFromPoint(x, y); } catch (_) { target = null; }
+    if (!target || !(target === el || el.contains(target))) target = el;   // 被別的東西蓋住、或在畫面外：還是點它本身
+    const link = target.closest ? target.closest('a') : null;
+    if (link && el.contains(link)) { pageClick(link); return link; }
+    const opts = { bubbles: true, cancelable: true, composed: true, view: window, clientX: x, clientY: y, button: 0, buttons: 1 };
+    try {
+      target.dispatchEvent(new PointerEvent('pointerdown', { ...opts, pointerType: 'mouse', isPrimary: true }));
+      target.dispatchEvent(new MouseEvent('mousedown', opts));
+      target.dispatchEvent(new PointerEvent('pointerup', { ...opts, buttons: 0, pointerType: 'mouse', isPrimary: true }));
+      target.dispatchEvent(new MouseEvent('mouseup', { ...opts, buttons: 0 }));
+      target.dispatchEvent(new MouseEvent('click', { ...opts, buttons: 0 }));
+    } catch (_) {
+      target.click();
+    }
+    return target;
+  }
+
+  /**
    * 先跟購票網站建好連線（DNS、TCP、TLS）：開賣後從活動頁跳到 orders.ibon.com.tw 時，第一次連線不用再握手。
    * 只是給瀏覽器的提示（<link rel="preconnect">），不送任何請求內容。Chrome 閒置的預先連線大約十秒會關掉，
    * 所以在開賣前幾秒、和開賣後活動頁一載入時各加一次。
@@ -1164,10 +1194,10 @@
    * 按下去並等結果。等的這段時間請 alert-hook.js 接管對話框：alert 不跳出來（不然頁面會停住、要你按確定），
    * 照 kktix 助手「只在等結果的那幾秒接管」的做法，等完就交還。換頁成功時這個頁面已經卸載，新頁面一開始就不接管。
    */
-  async function clickAndWatch(el, maxMs, label) {
+  async function clickAndWatch(el, maxMs, label, clicker = pageClick) {
     const before = state.alerts.length;
     window.postMessage({ __ith: 'catch', ms: maxMs + 2000 }, location.origin);
-    pageClick(el);
+    clicker(el);
     try {
       return await watchAfterClick(before, maxMs, label);
     } finally {
@@ -1404,6 +1434,43 @@
     return { text: `${name} ${price} ${seat}`, name, price, seat, left, unavailable };
   }
 
+  /** 這個元素看起來是不是「已選」：radio 勾了，或 class / aria 標了選取 */
+  const looksSelected = (el) => !!(el.checked || el.getAttribute('aria-checked') === 'true' || el.getAttribute('aria-selected') === 'true'
+    || /(^|\s)(active|selected|checked|on|current)(\s|$)/i.test(el.className || ''));
+
+  /** radio 的說明文字：<label for>、包著它的 <label>、或緊接在後面的字 */
+  function radioLabel(input) {
+    const byFor = input.id ? deepAll(`label[for="${CSS.escape(input.id)}"]`)[0] : null;
+    const wrap = input.closest ? input.closest('label') : null;
+    const next = input.nextElementSibling || (input.parentElement && input.parentElement.nextElementSibling);
+    return norm((byFor || wrap || next || {}).textContent || '');
+  }
+
+  /**
+   * 購票方式可以選「自行選位」或「電腦配位」時（2026-10-16 活動 39978：「購票方式： 自行選位 電腦配位」），先選電腦配位：
+   * 助手的流程是選張數讓 ibon 配位，不會替你點座位圖。只點看起來點得動的（radio、label、按鈕、連結、滑鼠會變手指的），純文字不動。
+   * 回傳 'selected' 選了、'already' 本來就是、null 找不到可以點的。
+   */
+  async function chooseComputerSeat() {
+    for (const input of deepAll('input[type="radio"]')) {
+      if (!/電腦配位/.test(radioLabel(input))) continue;
+      if (input.checked) return 'already';
+      const target = isVisible(input) ? input : (input.id && deepAll(`label[for="${CSS.escape(input.id)}"]`)[0]) || input.closest('label') || input;
+      pageClick(target);
+      await settle(150, 3000, 150);
+      return 'selected';
+    }
+    const clickable = deepAll('button, a, label, [role="radio"], [role="tab"], [onclick], .btn, li, span, div').filter((el) => isVisible(el)
+      && norm(el.textContent) === '電腦配位' && (/^(BUTTON|A|LABEL)$/.test(el.tagName) || el.hasAttribute('onclick') || el.getAttribute('role')
+        || /(^|\s)btn(\s|$)/.test(el.className || '') || getComputedStyle(el).cursor === 'pointer'));
+    const el = clickable[clickable.length - 1];   // 最裡層的那一個
+    if (!el) return null;
+    if (looksSelected(el)) return 'already';
+    pointClick(el);
+    await settle(150, 3000, 150);
+    return 'selected';
+  }
+
   /** 選票區頁：照關鍵字、排除字選票區；之前售完過的票區（d.failedAreas）跳過 */
   async function runArea(cfg, d = {}) {
     setStatus('選票區中…', 'ok');
@@ -1444,10 +1511,22 @@
     }
     if (pick.kind === 'fallback') log(`關鍵字都沒比對到，照遞補設定改選第一個還能買的：${pick.text}`, 'warn');
     else log(`選中票區：${pick.text}（${pageAge()}）`);
+    const pageText = visibleText();
+    if (/自行選位/.test(pageText) && /電腦配位/.test(pageText)) {
+      const how = await chooseComputerSeat();
+      if (state.aborted || state.leaving) return undefined;
+      if (how === 'selected') log('購票方式改選「電腦配位」（助手不會替你點座位圖）');
+      else if (!how) log('頁面有「自行選位」和「電腦配位」，但找不到可以點的電腦配位選項，照原本的方式選票區', 'warn');
+    }
     const row = rows[pick.index];
-    const out = await clickAndWatch(row.querySelector('a[href], a[onclick]') || row, 30000, '正在處理票區');
+    const out = await clickAndWatch(row, 30000, '正在處理票區', pointClick);
     if (out.kind === 'alert') return handleAlert(out, '選票區', { areaText: infos[pick.index].name });
-    if (out.kind === 'timeout') return finish(false, 'no-advance', '選了票區但等了 30 秒頁面沒有進到下一步，請自己看畫面', { handOff: true });
+    if (out.kind === 'timeout') {
+      const seatMap = /選擇座位|座位圖|請點選座位|請選擇您的座位|已選座位/.test(visibleText());
+      return finish(false, 'no-advance', seatMap
+        ? '點了票區之後 ibon 出現座位圖，要你自己點座位（助手不會替你選座位）。請直接在畫面上選'
+        : '選了票區但等了 30 秒頁面沒有進到下一步，請自己看畫面', { handOff: true });
+    }
     return undefined;
   }
 
@@ -1738,9 +1817,51 @@
     return location.origin + location.pathname;
   }
 
+  /**
+   * 元素的結構骨架（標籤、id、class、會動作的屬性、短短的文字），給沒看過的頁面變化用：例如點了票區沒反應，
+   * 看得出點擊是掛在哪一層。不記輸入框的值；文字只留前 20 個字。最多 120 個節點。
+   */
+  function skeleton(el, budget = { n: 0 }, depth = 0) {
+    if (!el || budget.n >= 120 || depth > 8) return '';
+    if (el.hasAttribute && el.hasAttribute('data-ith')) return '';   // 助手自己的面板不記
+    budget.n++;
+    const tag = el.tagName ? el.tagName.toLowerCase() : '#';
+    const attrs = [];
+    if (el.id) attrs.push(`id="${String(el.id).slice(0, 40)}"`);
+    if (el.className && typeof el.className === 'string') attrs.push(`class="${el.className.slice(0, 60)}"`);
+    for (const a of ['type', 'name', 'role', 'onclick', 'href', 'for', 'aria-checked', 'aria-selected', 'data-id']) {
+      if (el.hasAttribute && el.hasAttribute(a)) attrs.push(`${a}="${String(el.getAttribute(a)).slice(0, 60)}"`);
+    }
+    if (el.checked) attrs.push('checked');
+    if (el.disabled) attrs.push('disabled');
+    const own = norm([...el.childNodes].filter((n) => n.nodeType === Node.TEXT_NODE).map((n) => n.nodeValue).join(' ')).slice(0, 20);
+    const sr = shadowOf(el);
+    const kids = [...(sr ? [{ shadow: true }] : []), ...el.children];
+    const inner = kids.map((k) => (k.shadow ? `<#shadow>${[...sr.children].map((c) => skeleton(c, budget, depth + 1)).join('')}</#shadow>` : skeleton(k, budget, depth + 1))).join('');
+    return `<${tag}${attrs.length ? ' ' + attrs.join(' ') : ''}>${own}${inner}</${tag}>`;
+  }
+
+  /** 這一頁重點區塊的骨架：「購票方式」那一段、票區表格的前兩列（選票區頁） */
+  function keyParts() {
+    const parts = [];
+    // 「購票方式」：從寫著這幾個字的最裡層元素往外找，找到把選項也包進來的那一層（最多往上三層）
+    const marks = deepAll('*').filter((el) => /^購票方式/.test(norm(el.textContent)) && norm(el.textContent).length < 60);
+    let how = marks.sort((a, b) => norm(a.textContent).length - norm(b.textContent).length)[0] || null;
+    if (how) {
+      const base = norm(how.textContent).length;
+      for (let i = 0; i < 3 && how.parentElement && norm(how.textContent).length <= base + 2; i++) how = how.parentElement;
+      parts.push('購票方式：' + skeleton(how));
+    }
+    if (pageKind() === 'area') {
+      const rows = areaRows();
+      const ok = rows.filter((r) => !/已售完/.test(r.textContent)).slice(0, 2);
+      for (const r of (ok.length ? ok : rows.slice(0, 2))) parts.push('票區列：' + skeleton(r));
+    }
+    return parts.join('\n').slice(0, 4000);
+  }
+
   function snapshot(kind, msg) {
     const vis = [...document.querySelectorAll('button, a.btn, input[type="submit"]')].filter(isVisible);
-    const content = $('#content') || $('main') || document.body;
     const rows = pageKind() === 'area' ? areaRows().map((r) => areaInfo(r, 1).text) : sessionRows().map((r) => norm(r.textContent));
     return {
       at: Date.now(), kind, msg: String(msg || '').slice(0, 300),
@@ -1749,7 +1870,8 @@
       buttons: vis.map((b) => norm(b.textContent || b.value).slice(0, 30)).filter(Boolean).slice(0, 15),
       modals: [...document.querySelectorAll('.modal, [role="dialog"], .alert')].filter(isVisible).map((m) => norm(m.innerText).slice(0, 200)).slice(0, 5),
       alerts: state.alerts.slice(-3),
-      text: content ? norm(content.innerText || '').slice(0, 800) : '',
+      text: norm(visibleText()).slice(0, 2000),   // 連同 Shadow DOM 裡的字（票區表、座位圖都在裡面）
+      html: keyParts(),
     };
   }
 
