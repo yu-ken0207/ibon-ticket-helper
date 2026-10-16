@@ -439,7 +439,9 @@ async function onWarn(tabId, p) {
     await set({ task: { ...t, warned: { ...(t.warned || {}), [kind]: Date.now() } } });
     return true;
   });
-  if (first) notify('ibon：請注意', p.msg || kind, true);
+  // 填購票資訊頁一進來名額就保留了：用比較醒目的標題，開始倒數保留時間
+  if (first) notify(kind === 'held' ? 'ibon：名額已保留' : 'ibon：請注意', p.msg || kind, true);
+  if (first && kind === 'held') await badge('✓', '#0a7d55');
   addLog(p.msg || kind, 'warn');
   return { ok: true };
 }
@@ -562,6 +564,13 @@ async function onOffTrack(tabId, kind, url) {
     const msg = 'ibon 要你重新登入。登入後回到活動頁';
     if (t.phase === 'armed') await onWarn(tabId, { kind: 'guest', msg: msg + '，助手會照常倒數' });
     else await onResult(tabId, { ok: false, kind: 'guest', url, handOff: true, msg: msg + '，在擴充功能按「立即執行」' });
+    return;
+  }
+  if (kind === 'card-validate') {
+    // 持卡人優先購：要你驗證卡片資格，助手不代填；驗證完進到購票流程，助手會接著動作
+    const msg = 'ibon 要你先驗證持卡人資格（優先購）。請自己完成，之後的步驟助手會接著做';
+    if (t.phase === 'armed') await onWarn(tabId, { kind: 'card-validate', msg });
+    else await onResult(tabId, { ok: false, kind: 'card-validate', url, handOff: true, msg });
     return;
   }
   await recoverTab(tabId, 'ibon 回了錯誤頁', 'navigate');

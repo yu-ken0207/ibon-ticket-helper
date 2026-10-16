@@ -1,4 +1,6 @@
-  /* ───────────────────────── 流程 ───────────────────────── */
+  /* ───────────────────────── 流程：共用的工具與分派 ─────────────────────────
+   * 各頁的動作分在 61～67：61-countdown 活動頁倒數、62-event 活動頁點場次、63-verify 驗證問題頁、
+   * 64-area 選票區頁、65-qty 座位/數量頁、66-buyer 填購票資訊頁、67-check 讀取活動。 */
 
   /** 把你要接手的元素框起來 */
   function handToUser(el) {
@@ -99,6 +101,19 @@
     return { kind: 'timeout' };
   }
 
+  /**
+   * ibon 的「正在驗證您是否是人類」檢查頁：等它自己通過（通過後頁面會重新載入，由新頁面接手），
+   * 這段時間不重新整理、不點任何東西。過了 maxMs 還在就回 false。
+   */
+  async function waitChallenge(maxMs = 60000) {
+    const t0 = Date.now();
+    while (challengeText() && Date.now() - t0 < maxMs && !state.aborted) {
+      setStatus(`ibon 正在驗證您是否是人類，請等它通過（已等 ${Math.floor((Date.now() - t0) / 1000)} 秒；助手不處理，也不重新整理）`, 'warn');
+      await sleep(500);
+    }
+    return !challengeText();
+  }
+
   /** alert 的結果：登入問題交給你，其他算被拒絕，照額度重試 */
   async function handleAlert(out, label) {
     if (/登入|sign in|log in/i.test(out.msg)) return finish(false, 'guest', `ibon 要求登入：「${out.msg}」`, { handOff: true });
@@ -106,59 +121,7 @@
     return retry('fail', `${label}時 ibon 回覆「${out.msg}」`);
   }
 
-  /* ───────────────────────── 倒數 ───────────────────────── */
-
-  async function runCountdown(d) {
-    const cfg = d.cfg || {};
-    const fireAt = d.targetTs + (cfg.fireOffsetMs == null ? 30 : cfg.fireOffsetMs);
-    panel();
-    setStatus('已排程，等待開賣', 'ok');
-    await domReady();
-    const rows = await waitSessions(15000);
-    if (loginState() === 'logged-out') {
-      setStatus('還沒登入 ibon！請先登入，登入後回到這一頁', 'err');
-      send('warn', { kind: 'guest', msg: '活動頁顯示你還沒登入。請在開賣前登入，否則時間到也買不了票。' });
-    }
-    // 開賣前場次就看得到：先檢查你選的場次有沒有，選錯現在就會發現，不用等到開賣
-    if (rows.length) {
-      const col = columnsOf(sessionHeader());
-      const hit = rows.filter((r) => sessionKey(readRow(r, col).when) === sessionKey(cfg.sessionWhen));
-      if (hit.length === 1) log(`找到場次：${sessionKey(cfg.sessionWhen)}`, 'ok');
-      else {
-        const msg = hit.length ? `有多列相同演出時間「${sessionKey(cfg.sessionWhen)}」，助手不知道該選哪一個` : `活動頁上找不到你選的場次「${sessionKey(cfg.sessionWhen)}」`;
-        log(msg, 'warn');
-        send('warn', { kind: 'session', msg });
-      }
-      const h = healthItems(cfg);
-      send('health', { context: 'preopen', worst: h.worst, items: h.items, bundles: h.bundles });
-    } else {
-      log('現在還讀不到場次表，開賣時重新整理會再試', 'warn');
-    }
-    if (cfg.syncClock !== false) {
-      await doSync('已與 ibon 伺服器對時');
-      if (!state.clockReliable) resyncWhenVisible(fireAt);
-      if (fireAt - now() > 45000) {
-        if (!(await waitUntil(fireAt - 30000))) return;
-        await doSync('開賣前再對時一次');
-      }
-    }
-    // 頁面本身就是在開賣之後才載入的（例如視窗開晚了）
-    const loadedAt = performance.timeOrigin + state.clockOffset;
-    if (loadedAt >= fireAt) {
-      await call('fired', { at: Date.now(), drift: Math.round(now() - fireAt) }, 800);
-      return runFlow({ cfg, since: Date.now() });
-    }
-    // 開賣前 0.3 秒先跟背景程式報備「要重新整理了」，等它回覆；到點時就不用再等，重新整理可以立刻發出
-    if (!(await waitUntil(fireAt - 300))) return;
-    await call('fired', { at: Date.now(), drift: null }, 800);
-    if (!(await waitUntil(fireAt))) return;
-    const drift = Math.round(now() - fireAt);
-    setStatus('開賣時間到，重新整理…', 'ok');
-    send('fired-drift', { drift });   // 只是紀錄誤差，不等回覆
-    location.reload();
-  }
-
-  /* ───────────────────────── 各頁的動作 ───────────────────────── */
+  /* ───────────────────────── 分派 ───────────────────────── */
 
   async function runFlow(d) {
     if (state.running) return;
@@ -171,6 +134,7 @@
       await domReady();
       const kind = pageKind();
       if (kind === 'event') await runEvent(cfg, d);
+      else if (kind === 'verify') await runVerify(cfg);
       else if (kind === 'area') await runArea(cfg);
       else if (kind === 'qty') await runQty(cfg);
       else if (kind === 'buyer') await runBuyer(cfg);
@@ -179,164 +143,6 @@
     } finally {
       state.running = false;
     }
-  }
-
-  /** 活動頁：找你選的場次，「線上購票」可按就點；還不能按就照尚未開賣重試 */
-  async function runEvent(cfg, d) {
-    setStatus('找場次中…', 'ok');
-    const rows = await waitSessions(15000);
-    if (state.aborted) return;
-    if (!rows.length) return loadRetry('ibon 活動頁沒有出現場次表');
-    if (d && d.loadFail) send('load-ok', {});
-    if (loginState() === 'logged-out') {
-      return finish(false, 'guest', '目前沒有登入 ibon，所以沒有動作。請登入後在擴充功能按「立即執行」', { handOff: true });
-    }
-    const col = columnsOf(sessionHeader());
-    const hit = rows.filter((r) => sessionKey(readRow(r, col).when) === sessionKey(cfg.sessionWhen));
-    if (hit.length !== 1) {
-      const names = rows.map((r) => sessionKey(readRow(r, col).when)).join('、');
-      return finish(false, 'no-session', hit.length
-        ? `有多列相同演出時間「${sessionKey(cfg.sessionWhen)}」，不知道該選哪一個`
-        : `找不到場次「${sessionKey(cfg.sessionWhen)}」。頁面上的場次有：${names}`, { handOff: true });
-    }
-    const info = readRow(hit[0], col);
-    const st = sessionStatus(info.button, info.disabled);
-    const btn = hit[0].querySelector('button, a[role="button"], a.btn');
-    if (st.status === 'sold-out') return finish(false, 'sold-out', `場次「${sessionKey(cfg.sessionWhen)}」已售完`);
-    if (st.status === 'closed') return finish(false, 'closed', `場次「${sessionKey(cfg.sessionWhen)}」已截止`);
-    if (!btn || st.status !== 'on-sale') {
-      return retry('not-open', `場次「${sessionKey(cfg.sessionWhen)}」還不能買（按鈕：${info.button || '沒有'}${info.disabled ? '，灰的' : ''}）`);
-    }
-    const before = state.alerts.length;
-    log(`場次「${sessionKey(cfg.sessionWhen)}」可以買了，按下「${info.button}」`);
-    setStatus('按下線上購票…', 'ok');
-    pageClick(btn);
-    const out = await watchAfterClick(before, 20000, '正在進入購票流程');
-    if (out.kind === 'alert') return handleAlert(out, '按下線上購票');
-    if (out.kind === 'timeout') return retry('fail', '按下線上購票後 20 秒頁面沒有反應');
-    return undefined;
-  }
-
-  /** 選票區頁：照關鍵字、排除字選票區 */
-  async function runArea(cfg) {
-    setStatus('選票區中…', 'ok');
-    const t0 = Date.now();
-    let rows = areaRows();
-    while (!rows.length && Date.now() - t0 < 20000 && !state.aborted) {
-      const b = blockerText();
-      if (b) return finish(false, 'blocked-page', `頁面出現「${b}」，助手不處理，請你自己操作`, { handOff: true });
-      await sleep(300);
-      rows = areaRows();
-    }
-    if (state.aborted) return;
-    if (!rows.length) return finish(false, 'no-area-table', '票區頁一直沒有出現票區表格。可能是 ibon 改版了，請直接看畫面', { handOff: true });
-    const texts = rows.map(areaRowText);
-    const pick = pickOption(texts.map((text) => ({ text })), cfg);
-    if (pick.kind === 'sold-out') return finish(false, 'sold-out', `已售完：${pick.names.join('、')}`);
-    if (pick.kind === 'blocked') return finish(false, 'blocked', `對到的票區都在排除清單裡：${pick.names.join('、')}`, { handOff: true });
-    if (pick.kind === 'no-match') {
-      const ex = pick.excluded ? `（另有 ${pick.excluded} 個票區在排除清單裡）` : '';
-      return finish(false, 'no-match', `關鍵字比對不到任何票區。頁面上的票區有：${texts.join(' ／ ')}${ex}。請自己選`, { handOff: true });
-    }
-    if (pick.kind === 'fallback') log(`關鍵字都沒比對到，照遞補設定改選第一個還能買的：${pick.text}`, 'warn');
-    else log(`選中票區：${pick.text}`);
-    const row = rows[pick.index];
-    const before = state.alerts.length;
-    pageClick(row.querySelector('a[href], a[onclick]') || row);
-    const out = await watchAfterClick(before, 30000, '正在處理票區');
-    if (out.kind === 'alert') return handleAlert(out, '選票區');
-    if (out.kind === 'timeout') return finish(false, 'no-advance', '選了票區但等了 30 秒頁面沒有進到下一步，請自己看畫面', { handOff: true });
-    return undefined;
-  }
-
-  /** 座位/數量頁：選票區價格（多票區才有）、選張數、按下一步；有驗證碼就停手 */
-  async function runQty(cfg) {
-    setStatus('選張數中…', 'ok');
-    const t0 = Date.now();
-    while (!qtyPrice() && !qtySelects().length && Date.now() - t0 < 20000 && !state.aborted) {
-      const b = blockerText();
-      if (b && !qtyCaptcha()) return finish(false, 'blocked-page', `頁面出現「${b}」，助手不處理，請你自己操作`, { handOff: true });
-      await sleep(300);
-    }
-    if (state.aborted) return;
-    const price = qtyPrice();
-    if (price && price.selectedIndex <= 0) {
-      const opts = [...price.options].slice(1).map((o) => ({ text: o.text, value: o.value }));
-      const pick = pickOption(opts, cfg);
-      if (pick.kind === 'sold-out') return finish(false, 'sold-out', `已售完：${pick.names.join('、')}`);
-      if (pick.kind === 'blocked') return finish(false, 'blocked', `對到的票區都在排除清單裡：${pick.names.join('、')}`, { handOff: true });
-      if (pick.kind === 'no-match') return finish(false, 'no-match', `關鍵字比對不到任何票區。可選的有：${opts.map((o) => o.text).join(' ／ ')}。請自己選`, { handOff: true });
-      log(pick.kind === 'fallback' ? `關鍵字都沒比對到，改選第一個還能買的：${pick.text}` : `選中票區：${pick.text}`, pick.kind === 'fallback' ? 'warn' : 'info');
-      if (!setSelect(price, opts[pick.index].value)) return finish(false, 'fill-failed', '票區價格選不起來', { handOff: true });
-      await sleep(4000);   // ibon 會回傳重畫整頁；換頁的話這個頁面已經卸載，由新頁面接著做
-      if (state.aborted) return;
-      if (!qtySelects().length) return finish(false, 'no-qty', '選了票區價格但沒有出現購買數量，請自己看畫面', { handOff: true });
-    }
-    const sel = qtySelects()[0];
-    if (!sel) return finish(false, 'no-qty', '找不到「購買數量」的下拉選單。可能是 ibon 改版了，請直接看畫面', { handOff: true });
-    const have = [...sel.options].map((o) => Number(o.value)).filter((n) => Number.isFinite(n) && n > 0);
-    const want = Math.max(1, Math.min(Number(cfg.qty) || 1, 10));
-    if (!have.length) return finish(false, 'sold-out', '這個票區沒有可以選的張數（可能剛賣完）');
-    if (Math.max(...have) < want) return finish(false, 'qty-limit', `你要 ${want} 張，但這個票區最多只能選 ${Math.max(...have)} 張。請自己決定要不要買`, { handOff: true });
-    if (!setSelect(sel, want)) return finish(false, 'fill-failed', `張數選不到 ${want}`, { handOff: true });
-    log(`已選張數 ${want}`);
-    // 等 ibon 的背景更新做完；更新後如果張數被重置了就再選一次（最多三輪）
-    let stable = false;
-    for (let i = 0; i < 3 && !stable; i++) {
-      await settle(500, 8000, 800);   // 至少等 0.8 秒：ibon 的背景更新不一定一變動就開始
-      if (state.aborted) return;
-      const cur = qtySelects()[0];
-      if (cur && Number(cur.value) === want) { stable = true; break; }
-      if (!cur || !setSelect(cur, want)) return finish(false, 'fill-failed', `張數被頁面重置，重選 ${want} 失敗，請自己選`, { handOff: true });
-      log(`頁面更新後張數被重置，重選 ${want}`, 'warn');
-    }
-    if (!stable) {
-      await settle(500, 8000, 800);
-      const cur = qtySelects()[0];
-      if (!cur || Number(cur.value) !== want) return finish(false, 'fill-failed', `張數一直被頁面重置，選不住 ${want}，請自己選`, { handOff: true });
-    }
-    if (qtyCaptcha()) {
-      handToUser(qtyCaptcha());
-      return finish(false, 'captcha', '張數選好了。這一頁有驗證碼，請自己輸入後按下一步', { handOff: true });
-    }
-    const next = qtyNext();
-    if (!next) return finish(false, 'no-next', '找不到「下一步」按鈕，請自己按', { handOff: true });
-    const before = state.alerts.length;
-    pageClick(next);
-    log('按下「下一步」');
-    setStatus('已按下一步…', 'ok');
-    const out = await watchAfterClick(before, 45000, '正在處理（可能在排隊或配位）');
-    if (out.kind === 'alert') return handleAlert(out, '按下一步');
-    if (out.kind === 'timeout') return finish(false, 'timeout', '按下一步後等了 45 秒頁面還是沒有反應，請看畫面，先不要重新整理', { handOff: true });
-    return undefined;
-  }
-
-  /** 填購票資訊頁：勾同意、按下一步。不改你的資料（電話、Email 是會員資料，ibon 已經帶好） */
-  async function runBuyer(cfg) {
-    setStatus('填購票資訊頁…', 'ok');
-    const t0 = Date.now();
-    while ((!buyerAgree() || !buyerNext()) && Date.now() - t0 < 15000 && !state.aborted) await sleep(300);
-    if (state.aborted) return;
-    const agree = buyerAgree();
-    const next = buyerNext();
-    if (!agree || !next) return finish(false, 'no-buyer-form', '找不到「同意」或「下一步」，請自己操作', { handOff: true });
-    if (cfg.autoAgree === false) {
-      handToUser(agree);
-      return finish(false, 'agree', '你設定不自動勾選同意。請自己閱讀後勾選並按下一步', { handOff: true });
-    }
-    if (!agree.checked) pageClick(agree);
-    await sleep(150);
-    if (!agree.checked) return finish(false, 'agree-failed', '同意條款勾不起來，請自己勾選', { handOff: true });
-    log('已勾選同意約款');
-    await settle(500, 4000, 600);   // 勾選後 ibon 可能在背景更新頁面，等安靜了再按下一步
-    if (state.aborted) return;
-    const before = state.alerts.length;
-    pageClick(next);
-    log('按下「下一步」');
-    const out = await watchAfterClick(before, 45000, '正在處理');
-    if (out.kind === 'alert') return handleAlert(out, '按下一步');
-    if (out.kind === 'timeout') return finish(false, 'timeout', '按下一步後等了 45 秒頁面還是沒有反應，請看畫面，先不要重新整理', { handOff: true });
-    return undefined;
   }
 
   function showSuccess(d) {
@@ -362,32 +168,6 @@
       state.mode = 'run';
       runFlow({ cfg: c.cfg || {}, since: c.since });
     }
-  }
-
-  /** 「讀取活動」「檢查」按鈕：在背景分頁讀場次、開賣時間、票價，回報後由 background 關掉分頁。不按任何東西 */
-  async function runCheck(d) {
-    const cfg = d.cfg || {};
-    const report = (r) => call('check-result', r, 1500);
-    panel();
-    setStatus('讀取活動中…', 'ok');
-    await domReady();
-    if (pageKind() !== 'event') return report({ ok: false, error: '這不是 ibon 活動頁，請確認活動網址' });
-    const raw = await readIbonActivity(20000);
-    const info = buildEventInfo(raw, Date.now());
-    if (!info.sessions.length) {
-      return report({ ok: false, error: '沒有讀到任何場次（可能還沒開放、已下架，或頁面結構改了）', title: info.title });
-    }
-    const sale = (info.saleTimes || [])[0];
-    const sessions = info.sessions.map((s) => ({ when: s.when, name: s.name, status: s.status, statusLabel: s.statusLabel }));
-    const matched = cfg.sessionWhen ? sessions.filter((s) => sessionKey(s.when) === sessionKey(cfg.sessionWhen)).length : null;
-    const saleTxt = sale ? sale.at.replace('T', ' ').replace(/-/g, '/') : '節目介紹裡讀不到開賣時間';
-    const msg = `${info.title || '活動'}：${sessions.length} 個場次，開賣 ${saleTxt}`
-      + (matched === 0 ? `。注意：你選的場次「${sessionKey(cfg.sessionWhen)}」不在這個清單裡` : '');
-    setStatus(msg, matched === 0 ? 'err' : 'ok');
-    return report({
-      ok: matched !== 0, msg, title: info.title, sessions, saleAt: sale ? sale.at : null,
-      prices: info.prices, limits: info.limits, warnings: raw.warnings || [],
-    });
   }
 
   function handleDirective(d) {

@@ -9,7 +9,7 @@
   function snapshot(kind, msg) {
     const vis = [...document.querySelectorAll('button, a.btn, input[type="submit"]')].filter(isVisible);
     const content = $('#content') || $('main') || document.body;
-    const rows = pageKind() === 'area' ? areaRows().map(areaRowText) : sessionRows().map((r) => norm(r.textContent));
+    const rows = pageKind() === 'area' ? areaRows().map((r) => areaInfo(r, 1).text) : sessionRows().map((r) => norm(r.textContent));
     return {
       at: Date.now(), kind, msg: String(msg || '').slice(0, 300),
       url: safeUrl(), title: norm(document.title).slice(0, 80), page: pageKind(), login: loginState(),

@@ -67,17 +67,6 @@
     p.st.className = 'st ' + cls;
   }
 
-  /**
-   * 面板中間的大字（平常顯示倒數）。KKTIX 處理中時改成「處理中 N 秒」，讓你知道它沒當掉。
-   * 同樣的字也放在面板外框的 data-big 上，面板是封閉的 shadow root，測試只讀得到外框。
-   */
-  function setBig(text) {
-    const p = panel();
-    p.cd.textContent = text || '';
-    if (text) p.host.setAttribute('data-big', text);
-    else p.host.removeAttribute('data-big');
-  }
-
   function setCountdown(ms) {
     const p = panel();
     if (ms == null) { p.cd.textContent = ''; return; }

@@ -120,33 +120,14 @@
     return m ? m[0] : null;
   }
 
-  const SOLD_OUT = /已售完|售完|已額滿|額滿|暫無|無法購買/;
-
-  /* ───────────────────────── 選票區頁（UTK0201_000，第 2 步） ─────────────────────────
-   * 截圖看過：表格，欄位「顏色、票區、票價(NT$)、空位」，空位寫「熱賣中」。網頁結構還沒核對：
-   * 列裡有連結就點連結，沒有就點整列。 */
-  function areaRows() {
-    return deepAll('tbody tr').filter((r) => isVisible(r) && $$('td', r).length >= 2 && /NT|\d/.test(norm(r.textContent)));
+  /**
+   * ibon 的「正在驗證您是否是人類」檢查頁（2026-10-16 看過：網址不變，頁面換成檢查頁，通過後自己重新載入）。
+   * 助手不處理、不繞過，只是在這段時間不要重新整理，免得打斷檢查。
+   */
+  function challengeText() {
+    const m = visibleText().match(/正在驗證您是否是人類|驗證您是否是人類|Checking your browser|Just a moment/i);
+    return m ? m[0] : null;
   }
-  const areaRowText = (r) => norm($$('td', r).map((td) => td.textContent).join(' '));
-
-  /* ───────────────────────── 座位/數量頁（UTK0202_，第 3 步，2026-10-16 真站快照） ─────────────────────────
-   * 「票區價格」下拉（#ctl00_ContentPlaceHolder1_PRICE，多票區才有），再有「購買數量」表格（#…_DataGrid）。
-   * 選了票區價格，ibon 會回傳重畫整頁；「下一步」是 #ctl00_ContentPlaceHolder1_AddShopingCart。 */
-  const QTY = {
-    price: '#ctl00_ContentPlaceHolder1_PRICE',
-    grid: '#ctl00_ContentPlaceHolder1_DataGrid',
-    next: '#ctl00_ContentPlaceHolder1_AddShopingCart',
-    captcha: '#ctl00_ContentPlaceHolder1_CHK, input[id*="CHK"]',
-  };
-  const qtyPrice = () => { const s = $(QTY.price); return s && isVisible(s) ? s : null; };
-  const qtySelects = () => {
-    const grid = $(QTY.grid) || $('table.rwdtable');
-    return grid ? deepAll('select.form-control-sm', grid).filter(isVisible) : [];
-  };
-  const qtyNext = () => $(QTY.next) || $('a[id*="AddShopingCart"]')
-    || deepAll('a.btn.btn-primary.btn-block').find((b) => isVisible(b) && /下一步/.test(b.textContent)) || null;
-  const qtyCaptcha = () => deepAll(QTY.captcha).find(isVisible) || null;
 
   /**
    * 點元素。href 是 javascript: 的連結（ibon 的「下一步」）在擴充功能的環境裡點會被擴充功能自己的 CSP 擋掉，
@@ -169,14 +150,3 @@
     sel.dispatchEvent(new Event('change', { bubbles: true }));
     return sel.value === String(value);
   }
-
-  /* ───────────────────────── 填購票資訊頁（UTK0206_，第 4 步，2026-10-16 真站快照） ───────────────────────── */
-  const buyerAgree = () => $$('input[type=checkbox]').find((c) => {
-    const l = c.id ? $(`label[for="${CSS.escape(c.id)}"]`) : null;
-    return l && /同意/.test(l.textContent);
-  }) || null;
-  const buyerNext = () => deepAll('a, button').find((b) => isVisible(b) && /^下一步/.test(norm(b.textContent))) || null;
-  const buyerCountdown = () => {
-    const t = $$('span').filter(isVisible).map((el) => norm(el.textContent)).find((x) => /^剩餘時間\s*\d{1,2}\s*[:：]\s*\d{2}$/.test(x));
-    return t || null;
-  };
