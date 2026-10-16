@@ -105,12 +105,15 @@ test('操作政策（模擬站）：選擇與保留可以自動；建立訂單�
 test('操作政策（ibon）：只讀可以；選擇、張數、送出要網站規則確認；驗證、排隊、付款不做', () => {
   const t = Object.fromEntries(policyTable('ibon').map((x) => [x.action, x]));
   assert.equal(t['read-page'].decision, D.ALLOWED);
-  for (const a of ['select-session', 'select-area', 'set-quantity', 'submit-hold', 'submit-buyer', 'confirm-order', 'refresh-list']) {
-    assert.equal(t[a].decision, D.CONFIRMATION_REQUIRED, a);
+  assert.equal(t['select-session'].decision, D.ALLOWED);
+  assert.match(t['select-session'].reason, /客服中心 2026-10-16/);
+  for (const a of ['select-area', 'set-quantity', 'submit-hold', 'submit-buyer', 'refresh-list']) {
+    assert.equal(t[a].decision, D.ALLOWED, a);
     assert.ok(t[a].reason, a);
   }
+  assert.equal(t['confirm-order'].decision, D.CONFIRMATION_REQUIRED);
   for (const a of ['solve-challenge', 'bypass-queue', 'payment']) assert.equal(t[a].decision, D.BLOCKED, a);
-  assert.match(t['select-session'].reason, /第十一條/);
+  assert.match(t['select-area'].reason, /第二封回覆/);
 });
 
 /* ───── 需求比對與規劃 ───── */

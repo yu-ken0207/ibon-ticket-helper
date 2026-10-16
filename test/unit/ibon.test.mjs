@@ -15,11 +15,13 @@ test('ibon 頁面分類：活動頁、線上購票轉址、購票入口（網址
 
 test('操作政策：網站上的操作一律由你自己做或不做；每一項都附依據', () => {
   const by = Object.fromEntries(IBON_POLICY.map((p) => [p.action, p]));
-  for (const a of ['select', 'quantity', 'submit', 'refresh']) assert.equal(by[a].mode, 'manual', a);
+  assert.equal(by.confirm.mode, 'manual');
+  for (const a of ['session', 'select', 'quantity', 'submit', 'refresh']) assert.equal(by[a].mode, 'auto', a);
   for (const a of ['captcha', 'queue', 'limit', 'payment']) assert.equal(by[a].mode, 'never', a);
   for (const a of ['read', 'compare', 'snapshot']) assert.equal(by[a].mode, 'auto', a);
   assert.ok(IBON_POLICY.every((p) => p.basis && p.label));
-  assert.match(by.select.basis, /第十一條/);
+  assert.match(by.select.basis, /客服中心 2026-10-16/);
+  assert.match(by.refresh.basis, /第二封回覆/);
 });
 
 test('活動資訊驗證：缺漏、全部售完、已截止、開賣時間、看不出狀態', () => {

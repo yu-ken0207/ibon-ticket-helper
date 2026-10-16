@@ -17,7 +17,7 @@ const OUT = path.join(ROOT, 'agent.js');
 const LIBS = ['format.js', 'clock.js', 'flow.js', 'planner.js'];
 const BANNER = '// 這個檔案由 tools/build.mjs 從 src/agent/ 和 lib/ 產生，請改那兩個地方，不要直接改這裡。\n';
 const INFO_OUT = path.join(ROOT, 'ibon-info.js');
-const INFO_PARTS = ['src/info/00-core.js', 'src/agent/05-dom.js', 'src/info/10-ibon.js', 'src/info/20-adapter.js', 'src/info/90-boot.js'];
+const INFO_PARTS = ['src/info/00-core.js', 'src/agent/05-dom.js', 'src/info/10-ibon.js', 'src/info/20-adapter.js', 'src/info/30-auto.js', 'src/info/40-flow.js', 'src/info/90-boot.js'];
 const INFO_LIBS = ['eventinfo.js', 'ibon.js', 'reminders.js'];
 const INFO_BANNER = '// 這個檔案由 tools/build.mjs 從 src/info/、src/agent/05-dom.js 和 lib/eventinfo.js、lib/ibon.js、lib/reminders.js 產生，請改那些地方，不要直接改這裡。\n';
 

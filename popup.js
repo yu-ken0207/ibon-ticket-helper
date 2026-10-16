@@ -122,6 +122,7 @@ async function previewUrl() {
   runState = r.ok ? { runnable: !!r.runnable, note: r.runNote || '' } : { runnable: false, note: r.error || '背景程式沒有回應，請重新開啟這個視窗' };
   applyRunState();
   $('infoBox').hidden = !(r.ok && r.ibonKind);
+  document.body.classList.toggle('ibon-mode', !$('infoBox').hidden);
   if (!$('infoBox').hidden) refreshSale();
   renderPolicy(r.ok ? r.policy : null);
   if (r.ok && r.regUrl) { hint.textContent = `${r.label}，時段列表：${r.regUrl}`; hint.className = 'hint'; }
@@ -143,50 +144,93 @@ async function previewUrl() {
 const STATUS_CLASS = { 'on-sale': 'st-on-sale', 'sold-out': 'st-sold-out', 'not-open': 'st-not-open', closed: 'st-closed', unknown: 'st-unknown' };
 const dtText = (iso) => (iso ? iso.replace('T', ' ').replace(/-/g, '/') : '');
 
+/** 開賣自動點場次：下拉選單列出讀到的場次，設定存在 ibonAuto（頁面程式直接讀） */
+async function renderAuto(info) {
+  const sel = $('autoWhen');
+  const { ibonAuto = {} } = await chrome.storage.local.get('ibonAuto');
+  const whens = [...new Set(((info && info.sessions) || []).map((s) => s.when).filter(Boolean))];
+  sel.replaceChildren(el('option', { value: '' }, '（選一個場次）'), ...whens.map((w) => el('option', { value: w }, w)));
+  sel.value = whens.includes(ibonAuto.when) ? ibonAuto.when : '';
+  $('autoOn').checked = ibonAuto.enabled === true && !!sel.value;
+  $('autoQty').value = ibonAuto.qty || 1;
+  $('autoAreas').value = ibonAuto.areas || '';
+  if (ibonAuto.exclude != null) $('autoExclude').value = ibonAuto.exclude;
+}
+async function saveAuto() {
+  const when = $('autoWhen').value;
+  const enabled = $('autoOn').checked && !!when;
+  if ($('autoOn').checked && !when) { $('autoOn').checked = false; $('autoMsg').textContent = '請先選一個場次'; return; }
+  const { eventInfo } = await chrome.storage.local.get('eventInfo');
+  const sale = eventInfo && (eventInfo.saleTimes || []).map((x) => x.at).filter(Boolean).sort().pop();
+  await chrome.storage.local.set({ ibonAuto: { enabled, when, saleAt: sale || null, reloads: 0, qty: Math.max(1, Math.min(Number($('autoQty').value) || 1, 4)), areas: $('autoAreas').value, exclude: $('autoExclude').value } });
+  $('autoMsg').textContent = enabled ? '已開啟' : '已關閉';
+}
+/** 排程＝開啟自動，並在開賣前 90 秒自己開活動頁（同 kktix 助手：設好條件、按排程、等開賣）。已經過了那個時間就現在開 */
+const PRE_OPEN_MS = 90 * 1000;
+$('btnIbonSchedule').addEventListener('click', async () => {
+  if (!$('autoWhen').value) { $('autoMsg').textContent = '請先按「讀取活動資訊」，再選一個場次'; return; }
+  $('autoOn').checked = true;
+  await saveAuto();
+  if (!$('autoOn').checked) return;
+  const url = $('eventUrl').value.trim();
+  const id = (url.match(/ActivityInfo\/Details\/(\d+)/) || [])[1];
+  if (!id) return;
+  const { ibonAuto = {} } = await chrome.storage.local.get('ibonAuto');
+  const m = String(ibonAuto.saleAt || '').match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/);
+  const saleMs = m ? Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4] - 8, +m[5]) : NaN;
+  const openAt = saleMs - PRE_OPEN_MS;
+  await chrome.storage.local.set({ ibonAuto: { ...ibonAuto, url: `https://ticket.ibon.com.tw/ActivityInfo/Details/${id}`, openAt: Number.isFinite(openAt) ? openAt : null } });
+  if (Number.isFinite(openAt) && openAt > Date.now() + 5000) {
+    await chrome.alarms.clear('ibon-open');
+    chrome.alarms.create('ibon-open', { when: openAt });
+    const d = new Date(openAt);
+    $('autoMsg').textContent = `已排程：${clock(d.getTime())} 自動開啟活動頁（開賣前 90 秒）`;
+    return;
+  }
+  const tabs = await chrome.tabs.query({ url: `https://ticket.ibon.com.tw/ActivityInfo/Details/${id}*` });
+  if (tabs.length) { await chrome.tabs.update(tabs[0].id, { active: true }); await chrome.windows.update(tabs[0].windowId, { focused: true }); $('autoMsg').textContent = '已排程，活動頁已開著，留在前景等開賣'; }
+  else { await chrome.tabs.create({ url: `https://ticket.ibon.com.tw/ActivityInfo/Details/${id}`, active: true }); $('autoMsg').textContent = '已排程，已開啟活動頁，請確認已登入並留在前景'; }
+});
+$('btnIbonCancel').addEventListener('click', async () => { $('autoOn').checked = false; await saveAuto(); await chrome.alarms.clear('ibon-open'); });
+$('autoWhen').addEventListener('change', saveAuto);
+$('autoOn').addEventListener('change', saveAuto);
+$('autoQty').addEventListener('change', saveAuto);
+$('autoAreas').addEventListener('change', saveAuto);
+$('autoExclude').addEventListener('change', saveAuto);
+
 function renderInfo(info) {
   const v = $('infoView');
   v.replaceChildren();
+  renderAuto(info);
   if (!info) return;
   v.append(el('div', { class: 'title' }, info.title || '（沒有讀到標題）'));
-  for (const o of info.offers || []) v.append(el('div', { class: 'hint' }, `${o.label}：${o.value}`));
 
   v.append(el('h3', {}, `場次（${(info.sessions || []).length}）`));
   if ((info.sessions || []).length) {
     const table = el('table');
     const head = el('tr');
-    for (const h of ['演出時間', '場次', '場地', '狀態']) head.append(el('th', {}, h));
+    for (const h of ['演出時間', '場次', '狀態']) head.append(el('th', {}, h));
     table.append(head);
     for (const s of info.sessions) {
       const tr = el('tr');
       const extra = s.saleEnd ? `（${dtText(s.saleEnd)} 截止）` : s.saleStart ? `（${dtText(s.saleStart)} 開賣）` : '';
-      tr.append(el('td', {}, s.date ? `${dtText(s.date)} ${s.time || ''}`.trim() : s.when), el('td', {}, s.name), el('td', {}, s.venue),
+      tr.append(el('td', {}, s.date ? `${dtText(s.date)} ${s.time || ''}`.trim() : s.when), el('td', {}, s.name),
         el('td', { class: STATUS_CLASS[s.status] || '' }, s.statusLabel + extra));
       table.append(tr);
     }
     v.append(table);
   } else v.append(el('div', { class: 'hint' }, '沒有讀到場次'));
 
-  v.append(el('h3', {}, '票區與票價（節目介紹的文字）'));
   if ((info.prices || []).length) {
+    v.append(el('h3', {}, '票價'));
     const ul = el('ul');
     for (const p of info.prices) ul.append(el('li', {}, `${p.name || '（沒寫名稱）'}　NT$${p.price.toLocaleString('en-US')}`));
     v.append(ul);
-  } else v.append(el('div', { class: 'hint' }, '節目介紹裡沒有認得的票價'));
-  for (const line of info.priceLines || []) v.append(el('div', { class: 'raw' }, `原文：${line}`));
-
-  v.append(el('h3', {}, '開賣時間'));
-  if ((info.saleTimes || []).length) {
-    for (const t of info.saleTimes) v.append(el('div', {}, dtText(t.at)), el('div', { class: 'raw' }, `原文：${t.text}`));
-  } else v.append(el('div', { class: 'hint' }, '節目介紹裡沒有認得的開賣時間'));
-
-  if ((info.limits || []).length) {
-    v.append(el('h3', {}, '限購（購票須知原文）'));
-    const ul = el('ul');
-    for (const l of info.limits) ul.append(el('li', {}, l));
-    v.append(ul);
   }
+  v.append(el('h3', {}, '開賣時間'));
+  v.append(el('div', {}, (info.saleTimes || []).length ? info.saleTimes.map((t) => dtText(t.at)).join('、') : '沒讀到'));
+  if ((info.limits || []).length) v.append(el('div', { class: 'hint' }, info.limits[0]));
   for (const w of info.warnings || []) v.append(el('div', { class: 'warn' }, `注意：${w}`));
-  v.append(el('div', { class: 'raw' }, `讀取時間 ${fmt(info.readAt)}。票區與票價取自節目介紹的文字；實際能買的票區要進購票流程才看得到，助手不會進去。`));
 }
 
 $('btnInfo').addEventListener('click', async () => {

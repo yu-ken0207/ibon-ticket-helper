@@ -159,3 +159,37 @@ fieldset.prefs legend { font-weight: 700; padding: 0 4px; }
 .report summary { cursor: pointer; font-weight: 600; }
 .report textarea { width: 100%; box-sizing: border-box; }
 #saleList .checkrow span { flex: 1; }
+
+/* ibon 精簡畫面：只留網址、讀取結果、開賣提醒、開賣自動點場次、紀錄。
+   模擬站專用的需求/購票人資料/排程/健檢和 ibon 的人工操作模式、結構快照在 ibon 模式下收起來，要用時網址欄改成模擬站就會回來。 */
+body.ibon-mode fieldset.prefs,
+body.ibon-mode fieldset.profile,
+body.ibon-mode #advanced,
+body.ibon-mode #runNote,
+body.ibon-mode #msg,
+body.ibon-mode #regUrl,
+body.ibon-mode #checkView,
+body.ibon-mode #infoBox .prefs:not(.auto-box),
+body.ibon-mode #infoBox > .checkrow:has(#btnGuide),
+body.ibon-mode #guideMsg,
+body.ibon-mode #infoBox > p.hint:not(#infoMsg):not(#pageMsg),
+body.ibon-mode #pageView,
+body.ibon-mode #infoBox details,
+body.ibon-mode main > .checkrow,
+body.ibon-mode main > section:not(#infoBox):has(#reportBox),
+body.ibon-mode .foot,
+body.ibon-mode #infoBox .checkrow > .hint { display: none; }
+body.ibon-mode #saleBox .checkrow > .hint { display: none; }
+/* ibon 模式：模擬站專用的開賣時間欄與排程按鈕列收起來（ibon 用上面「開賣自動點場次」裡的排程／取消） */
+body.ibon-mode main > .buttons,
+body.ibon-mode main > label.field:has(input[type="datetime-local"]),
+body.ibon-mode main > label.field:has(#openAt),
+body.ibon-mode main > label.field:has(#saleTime) { display: none; }
+
+/* ibon 模式的版面照 kktix：網址 → 讀取結果 → 條件 → 排程／取消任務 → 紀錄；「開啟」勾選框只是狀態，由排程／取消控制 */
+body.ibon-mode label:has(#autoOn) { display: none; }
+body.ibon-mode #infoBox { border: 0; padding: 0; background: none; }
+body.ibon-mode .auto-box .buttons { margin: 8px 0; }
+
+body.ibon-mode #btnPage { display: none; }
+body.ibon-mode #infoBox > .checkrow:has(#btnSnapshot) .hint { display: none; }

@@ -43,7 +43,7 @@ test('活動頁建議：照偏好、附每個場次的理由；沒登入先登�
   assert.match(g.recommendation, /^先登入.*自己按「2026\/12\/05\(六\) 18:00 第一梯」那一列的「線上購票」/);
   assert.equal(g.expect.sessionText, '2026/12/05(六) 18:00 第一梯');
   assert.ok(g.basis.plan.ranked.some((r) => /第二梯/.test(r.text) && r.reason === '已額滿'));
-  assert.match(g.basis.policy, /由你自己做（CONFIRMATION_REQUIRED/);
+  assert.match(g.basis.policy, /助手可以自動做（要在設定視窗開啟）（ALLOWED/);
   assert.ok(g.basis.match.areas.some((m) => /2樓看台 NT\$150/.test(m)));
   assert.match(g.basis.match.qty, /2 張，在限購 4 張以內/);
   assert.match(guideActivity({ ...INFO, sessions: [{ ...INFO.sessions[0], status: 'not-open' }] }, cfg({ keywords: ['12/05 18:00'] })).recommendation, /還沒開賣.*不自動重新整理/);

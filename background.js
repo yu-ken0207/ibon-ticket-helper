@@ -1211,3 +1211,31 @@ async function restoreAlarms(reason) {
 }
 chrome.runtime.onStartup.addListener(() => { restoreAlarms('startup'); restoreSaleReminders(); });
 chrome.runtime.onInstalled.addListener((d) => { if (d && d.reason === 'update') restoreAlarms('reload'); restoreSaleReminders(); });
+
+/* ───────── ibon：開賣前 90 秒自己開活動頁（同 kktix 助手的預先開頁；倒數與開賣後的動作在 ibon-info.js） ─────────
+ * 彈出視窗按「排程」時設好 ibon-open 鬧鐘，並把網址、開頁時間存在 ibonAuto。鬧鐘響了：還開著設定就把活動頁帶到前景，沒開就開一個。 */
+chrome.alarms.onAlarm.addListener(async (alarm) => {
+  if (alarm.name !== 'ibon-open') return;
+  const { ibonAuto } = await chrome.storage.local.get('ibonAuto');
+  if (!ibonAuto || ibonAuto.enabled !== true || !ibonAuto.url) return;
+  const id = (ibonAuto.url.match(/ActivityInfo\/Details\/(\d+)/) || [])[1];
+  if (!id) return;
+  const tabs = await chrome.tabs.query({ url: `https://ticket.ibon.com.tw/ActivityInfo/Details/${id}*` });
+  if (tabs.length) {
+    await chrome.tabs.update(tabs[0].id, { active: true });
+    try { await chrome.windows.update(tabs[0].windowId, { focused: true }); } catch (_) { /* 視窗不在了 */ }
+  } else {
+    await chrome.tabs.create({ url: `https://ticket.ibon.com.tw/ActivityInfo/Details/${id}`, active: true });
+  }
+});
+
+/* 背景程式（重新）啟動時，從設定重建 ibon 預先開頁的鬧鐘：重新載入擴充功能會清掉鬧鐘，設定還在 */
+(async () => {
+  try {
+    const { ibonAuto } = await chrome.storage.local.get('ibonAuto');
+    if (ibonAuto && ibonAuto.enabled === true && Number(ibonAuto.openAt) > Date.now() + 2000) {
+      const cur = await chrome.alarms.get('ibon-open');
+      if (!cur || Math.abs(cur.scheduledTime - ibonAuto.openAt) > 1000) chrome.alarms.create('ibon-open', { when: Number(ibonAuto.openAt) });
+    }
+  } catch (_) { /* 沒有設定就算了 */ }
+})();

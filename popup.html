@@ -17,7 +17,7 @@
   <p class="hint" id="regUrl"></p>
 
   <section id="infoBox" class="infobox" hidden>
-    <div class="boxtitle">ibon：助手只讀取與比對，網站上的操作由你自己做</div>
+    <div class="boxtitle">ibon</div>
     <div class="checkrow">
       <button id="btnInfo" class="small" type="button">讀取活動資訊</button>
       <span class="hint">只讀活動頁上的場次、票價、開賣時間，不會選票、送出或購買</span>
@@ -37,6 +37,33 @@
     <div class="prefs">
       <div class="boxtitle">跟下面「我的需求」比對（只比對，不會替你選）</div>
       <div id="matchView" class="infoview"></div>
+    </div>
+
+    <div class="prefs auto-box">
+      <div class="boxtitle">開賣自動點場次</div>
+      <div class="checkrow">
+        <select id="autoWhen"><option value="">先按上面的「讀取活動資訊」</option></select>
+        <label><input id="autoOn" type="checkbox"> 開啟</label>
+      </div>
+      <div class="checkrow">
+        <label>張數 <input id="autoQty" type="number" min="1" max="4" value="1" style="width:3.5em"></label>
+        <label>票區關鍵字（選填，一行一組） <textarea id="autoAreas" rows="2" spellcheck="false"></textarea></label>
+      </div>
+      <div class="checkrow">
+        <label>排除字（一行一個，名稱含這些字的票區不選） <textarea id="autoExclude" rows="3" spellcheck="false">輪椅
+身障
+身心
+障礙
+愛心
+Restricted View
+燈柱遮蔽
+視線不完整</textarea></label>
+      </div>
+      <div class="buttons">
+        <button id="btnIbonSchedule" class="primary" type="button">排程</button>
+        <button id="btnIbonCancel" class="danger" type="button">取消任務</button>
+      </div>
+      <p id="autoMsg" class="hint" role="status"></p>
     </div>
 
     <div class="checkrow">

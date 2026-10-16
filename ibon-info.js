@@ -315,10 +315,12 @@
     { action: 'read', label: '讀取你已經打開的頁面資訊', mode: 'auto', basis: '只讀頁面上看得到的內容，不送請求、不改變網站狀態' },
     { action: 'compare', label: '比對你的票區、張數需求', mode: 'auto', basis: '在擴充功能裡計算，不碰網站' },
     { action: 'snapshot', label: '記錄頁面結構快照（你按了才記）', mode: 'auto', basis: '只讀；遮掉 Email、電話、身分證、長數字，不記錄欄位內容' },
-    { action: 'select', label: '點選場次、票區', mode: 'manual', basis: '服務條款第十一條：不得以「非本公司認可之方式」使用本系統；第五條：請依照螢幕上程序操作' },
-    { action: 'quantity', label: '選張數', mode: 'manual', basis: '同上' },
-    { action: 'submit', label: '按「下一步」、送出訂單', mode: 'manual', basis: '同上；送出是不可逆的操作，一定由你自己按' },
-    { action: 'refresh', label: '開賣時自動重新整理', mode: 'manual', basis: '服務條款開頭敬告（不得以不正方式利用電腦程式搶購）、第十二條(4) 異常大量交易' },
+    { action: 'session', label: '點選場次（開賣時自動點你選的場次的「線上購票」一次）', mode: 'auto', basis: 'ibon 售票服務客服中心 2026-10-16 回覆：允許於自動讀取活動資訊、選擇場次、填寫訂購資料使用自動化工具；仍不得規避驗證、排隊、限購等機制' },
+    { action: 'select', label: '點選票區', mode: 'auto', basis: 'ibon 售票服務客服中心 2026-10-16 第二封回覆：允許自動選擇區段、選取張數、點選下一頁、勾選同意約款（限個人購票使用）' },
+    { action: 'quantity', label: '選張數', mode: 'auto', basis: '同上' },
+    { action: 'submit', label: '按「下一步」、勾同意約款', mode: 'auto', basis: '同上；驗證碼由你輸入，付款由你本人親自操作' },
+    { action: 'refresh', label: '開賣時自動重新整理（到點後一次、之後每秒一次、最多 30 次）', mode: 'auto', basis: 'ibon 客服 2026-10-16 第二封回覆：不設特定秒數限制，但異常頻繁的請求會被系統防護機制處理（如 IP 阻斷），請符合人類正常操作邏輯' },
+    { action: 'confirm', label: '最後的確認／建立訂單', mode: 'manual', basis: '不可逆；助手不做，一定由你自己按' },
     { action: 'captcha', label: '驗證碼', mode: 'never', basis: '不繞過驗證機制，由你自己輸入' },
     { action: 'queue', label: '排隊、流量控管', mode: 'never', basis: '不繞過；購票須知：「出現流量控管中，請耐心等候重新再試」' },
     { action: 'limit', label: '超過限購（例如用其他帳號）', mode: 'never', basis: '服務條款第十一條(4) 重覆註冊帳號規避限制；購票須知「每位會員限購 N 張」' },
@@ -1040,6 +1042,215 @@
     snapshot: (own) => snapshotStructure(own),
   };
 
+  /* ───────────────────────── 開賣自動點場次（ibon 客服 2026-10-16 回覆：允許自動選擇場次） ─────────────────────────
+   * 只在你開著的活動頁做一件事：你選的那個場次的「線上購票」按鈕變成可按時，點一次。
+   * 開賣時間到了按鈕還是灰的才重新整理（到點後 30 毫秒一次，之後每 1 秒一次，最多 30 次（同 kktix 助手預設））；沒登入不點；選票區、張數、驗證碼、排隊、送出、付款都不碰。
+   * 設定在 chrome.storage.local 的 ibonAuto：{ enabled, when（場次的演出時間，例如「2026/10/24 13:00」）, saleAt（開賣時間，台灣時間 ISO）, reloads, lastReload, lastClick }。
+   * 沒到開賣時間就只等（每 0.3 秒看一眼畫面）。 */
+  const AUTO_POLL_MS = 300;
+  const AUTO_GIVE_UP_MS = 30 * 60 * 1000;
+  const AUTO_NO_REPEAT_MS = 2 * 60 * 1000;
+  // 開賣時間一到按鈕還是灰的，才重新整理頁面（像 kktix 助手：準時整理一次，之後隔一段時間再整理，次數有上限，用完就停下來交給你）
+  const AUTO_RELOAD_GAP_MS = 1000;   // 同 kktix 助手的 notOpenRetryMs
+  const AUTO_FIRE_OFFSET_MS = 30;   // 同 kktix 助手的 fireOffsetMs：到點後再等一下才整理
+  const AUTO_RELOAD_MAX = 30;    // 同 kktix 助手的 notOpenMaxRetries
+
+
+  /* ───── 對時（做法同 kktix 助手 src/agent/30-clock.js）─────
+   * HTTP Date 只有秒精度，所以抓伺服器「跨秒」的那一瞬間：第一段每 140ms 探一次抓到跨秒，
+   * 第二段預測下一次跨秒，在附近每 20ms 同時送出探測，誤差約 20ms。量到的是「伺服器 − 本機」毫秒數，存在 ibonClock。
+   * 網頁在背景時 Chrome 會拖慢計時、量不準，發現被拖慢就放棄這次。 */
+  const CLOCK_FRESH_MS = 10 * 60 * 1000;
+  let clockBusy = false;
+  const probeOffset = (p) => Math.round(p.sec - (p.t1 - (p.t1 - p.t0) / 2));
+  async function headDate(url) {
+    const t0 = Date.now();
+    try {
+      const res = await fetch(url, { method: 'HEAD', cache: 'no-store', credentials: 'omit' });
+      const t1 = Date.now();
+      const sec = new Date(res.headers.get('Date') || '').getTime();
+      return Number.isFinite(sec) ? { t0, t1, sec } : null;
+    } catch (_) { return null; }
+  }
+  async function syncServerClock() {
+    if (clockBusy) return null;
+    clockBusy = true;
+    let throttled = document.hidden;
+    const onVis = () => { if (document.hidden) throttled = true; };
+    document.addEventListener('visibilitychange', onVis);
+    const nap = async (ms) => { const t = Date.now(); await sleep(ms); if (Date.now() - t > ms + 250) throttled = true; };
+    try {
+      const url = location.origin + '/assets/favicon.ico';
+      let prev = null; let coarse = null;
+      for (let i = 0; i < 15 && !coarse; i++) {
+        if (throttled) return null;
+        const p = await headDate(url);
+        if (!p) return null;
+        if (prev && p.sec > prev.sec) coarse = { offset: probeOffset(p), boundaryLocal: p.t1 - (p.t1 - p.t0) / 2 };
+        else { prev = p; await nap(140); }
+      }
+      if (!coarse) return null;
+      let offset = coarse.offset;
+      await nap(Math.max(0, coarse.boundaryLocal + 1000 - 170 - Date.now()));
+      if (throttled) return null;
+      const probes = [];
+      for (let i = 0; i < 12 && !throttled; i++) { probes.push(headDate(url)); await nap(20); }
+      if (throttled) return null;
+      const got = (await Promise.all(probes)).filter(Boolean).sort((a, b) => a.t0 - b.t0);
+      if (got.length) { const k = got.findIndex((q) => q.sec > got[0].sec); if (k > 0) offset = probeOffset(got[k]); }
+      if (throttled) return null;
+      try { await chrome.storage.local.set({ ibonClock: { offset, at: Date.now() } }); } catch (_) { /* 存不了就只用這一次 */ }
+      return offset;
+    } finally {
+      document.removeEventListener('visibilitychange', onVis);
+      clockBusy = false;
+    }
+  }
+  async function serverOffset() {
+    try { const c = (await chrome.storage.local.get('ibonClock')).ibonClock; return c && Date.now() - c.at < CLOCK_FRESH_MS ? { offset: Number(c.offset) || 0, fresh: true } : { offset: 0, fresh: false }; } catch (_) { return { offset: 0, fresh: false }; }
+  }
+
+  let autoRunning = false;
+  function ibonAutoWatch() {
+    ibonAutoSession();
+    try { chrome.storage.onChanged.addListener((ch, area) => { if (area === 'local' && ch.ibonAuto) ibonAutoSession(); }); } catch (_) { /* 沒有 storage 事件就只在載入時啟動 */ }
+  }
+
+  async function ibonAutoSession() {
+    if (autoRunning) return;
+    autoRunning = true;
+    try { await ibonAutoLoop(); } finally { autoRunning = false; }
+  }
+
+  /** 頁面右下角的倒數小標籤（同 kktix 助手的倒數面板）：只顯示，不能點 */
+  let autoBadge = null;
+  function showBadge(text) {
+    if (!document.body) return;
+    if (!autoBadge || !autoBadge.isConnected) {
+      autoBadge = document.createElement('div');
+      autoBadge.style.cssText = 'position:fixed;right:12px;bottom:12px;z-index:2147483647;background:#111;color:#fff;font:14px/1.4 sans-serif;padding:8px 12px;border-radius:8px;opacity:.9;pointer-events:none';
+      document.body.appendChild(autoBadge);
+    }
+    autoBadge.textContent = text;
+  }
+  const autoMmss = (ms) => { const s = Math.max(0, Math.ceil(ms / 1000)); return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`; };
+
+  async function ibonAutoLoop() {
+    let cfg;
+    try { cfg = (await chrome.storage.local.get('ibonAuto')).ibonAuto; } catch (_) { return; }
+    if (!cfg || cfg.enabled !== true || !cfg.when) return;
+    if (cfg.lastClick && Date.now() - cfg.lastClick < AUTO_NO_REPEAT_MS) return;
+    const strip = (s) => norm(s).replace(/\s*\([^)]*\)/, '');
+    const want = strip(cfg.when);
+    const saleMs = twMs(cfg.saleAt);
+    const t0 = Date.now();
+    let clk = await serverOffset();
+    while (Date.now() - t0 < AUTO_GIVE_UP_MS) {
+      // 每圈重讀設定：你在視窗關掉或換場次，立刻生效
+      try { const c = (await chrome.storage.local.get('ibonAuto')).ibonAuto; if (!c || c.enabled !== true || c.when !== cfg.when) return; cfg = c; } catch (_) { return; }
+      const col = columnsOf(sessionHeader());
+      const hit = sessionRows().filter((r) => strip(readRow(r, col).when) === want);
+      if (hit.length === 1) {
+        const info = readRow(hit[0], col);
+        const btn = hit[0].querySelector('button, a[role="button"], a.btn');
+        if (btn && /線上購票/.test(info.button) && !info.disabled && IbonAdapter.loginState().state !== 'logged-out') {
+          try { await chrome.storage.local.set({ ibonAuto: { ...cfg, lastClick: Date.now() } }); } catch (_) { /* 存不了也照點 */ }
+          btn.click();
+          return;
+        }
+      }
+      // 離開賣還有 15 秒以上、還沒有新的對時結果：背景對一次（不擋住上面的畫面檢查）
+      const now = Date.now() + clk.offset;
+      showBadge(saleMs > now ? `自動點場次：開賣倒數 ${autoMmss(saleMs - now)}` : `自動點場次：等「線上購票」可按（已整理 ${cfg.reloads || 0}/${AUTO_RELOAD_MAX} 次）`);
+      if (!clk.fresh && !clockBusy && saleMs - now > 15000) syncServerClock().then(async () => { clk = await serverOffset(); });
+      const n = cfg.reloads || 0;
+      if (saleMs + AUTO_FIRE_OFFSET_MS <= now && n < AUTO_RELOAD_MAX && Date.now() - (cfg.lastReload || 0) >= AUTO_RELOAD_GAP_MS) {
+        try { await chrome.storage.local.set({ ibonAuto: { ...cfg, reloads: n + 1, lastReload: Date.now() } }); } catch (_) { return; }
+        location.reload();
+        return;
+      }
+      const toFire = saleMs + AUTO_FIRE_OFFSET_MS - now;
+      await sleep(toFire > 0 && toFire < AUTO_POLL_MS ? toFire : AUTO_POLL_MS);
+    }
+  }
+
+  /* ───────────────────────── 購票流程自動操作（ibon 客服 2026-10-16 第二封回覆：允許自動選區、選張數、點下一步、勾同意約款） ─────────────────────────
+   * 只在 orders.ibon.com.tw 的購票頁，而且你在助手視窗開啟了「開賣自動點場次」才會動。每一頁只做一次：
+   *   UTK0201_000  票區頁：照你的票區關鍵字選第一個還有票的區（沒填關鍵字就選第一個還有票的）；關鍵字都對不到就不選，交給你
+   *   UTK0201_001 等 張數頁：把張數選成你設定的（不超過選單上限）；有驗證碼就停下來讓你自己輸入、自己按；沒有驗證碼才按「下一步」
+   *   UTK0206      填寫購票資訊：勾「同意」、按「下一步」（結構照 2026-10-16 真站快照）
+   * 驗證碼、排隊、流量控管字樣一出現就整頁不動。付款、最後的確認頁都不碰。
+   * 票區頁與張數頁的選擇器參考 tickets_hunter 的 ibon.py，這兩頁還沒在這個專案的真站快照核對過；找不到或對不上就什麼都不做。 */
+  async function ibonFlowWatch() {
+    let cfg;
+    try { cfg = (await chrome.storage.local.get('ibonAuto')).ibonAuto; } catch (_) { return; }
+    if (!cfg || cfg.enabled !== true) return;
+    const kind = IbonAdapter.pageKind();
+    if (kind !== 'purchase-entry' && kind !== 'purchase' && kind !== 'buyer-info') return;
+    const guardKey = `ibonFlow:${location.pathname}${location.search}`;
+    try { if (sessionStorage.getItem(guardKey)) return; } catch (_) { /* 沒有 sessionStorage 就靠下面的一頁一次 */ }
+    const stop = () => /排隊|流量控管|請稍候|機器人|robot/i.test(visibleText());
+    const t0 = Date.now();
+    while (Date.now() - t0 < 20000) {
+      if (stop()) return;
+      if (await ibonFlowStep(kind, cfg)) { try { sessionStorage.setItem(guardKey, '1'); } catch (_) {} return; }
+      await sleep(300);
+    }
+  }
+
+  const DEFAULT_EXCLUDE = ['輪椅', '身障', '身心', '障礙', '愛心', 'Restricted View', '燈柱遮蔽', '視線不完整'];
+  const flowVisible = (el) => !!el && isVisible(el);
+  const soldOut = (t) => /已售完|售完|已額滿|額滿|暫無|無法購買/.test(t);
+
+  /** 做完這一頁該做的事回 true；還沒準備好（頁面還在載入）回 false */
+  async function ibonFlowStep(kind, cfg) {
+    if (kind === 'purchase-entry') {
+      const rows = deepAll('tbody tr').filter((r) => flowVisible(r) && r.querySelector('a[href], a[onclick]'));
+      if (!rows.length) return false;
+      // 排除字（同 kktix 助手 exclude）：名稱含這些字的票區一律不選，沒設定就用預設
+      const exclude = (cfg.exclude == null ? DEFAULT_EXCLUDE : String(cfg.exclude).split(/\r?\n/)).map((x) => norm(x)).filter(Boolean);
+      const ok = rows.filter((r) => { const t = norm(r.textContent); return !soldOut(t) && !exclude.some((x) => t.toLowerCase().includes(x.toLowerCase())); });
+      const lines = String(cfg.areas || '').split(/\r?\n/).map((l) => norm(l)).filter(Boolean);
+      let pick = null;
+      for (const l of lines) {
+        const terms = l.split(' ');
+        pick = ok.find((r) => terms.every((t) => norm(r.textContent).includes(t)));
+        if (pick) break;
+      }
+      if (!pick && !lines.length) pick = ok[0];
+      if (!pick) return true;   // 沒有對得上的區：不選，交給你
+      const a = pick.querySelector('a[href], a[onclick]');
+      a.click();
+      return true;
+    }
+    if (kind === 'purchase') {
+      const sels = deepAll('table.rwdtable select.form-control-sm, table.table select[name*="AMOUNT_DDL"], select.form-control-sm').filter(flowVisible);
+      if (!sels.length) return false;
+      const want = Math.max(1, Math.min(Number(cfg.qty) || 1, 4));
+      const sel = sels[0];
+      const opts = [...sel.options].map((o) => Number(o.value)).filter((n) => Number.isFinite(n) && n > 0);
+      if (!opts.length) return true;
+      const n = Math.min(want, Math.max(...opts));
+      sel.value = String(n);
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
+      const captcha = deepAll('#ctl00_ContentPlaceHolder1_CHK, input[id*="CHK"]').find(flowVisible);
+      if (captcha) return true;   // 驗證碼由你輸入、你按下一步
+      const next = $('#ctl00_ContentPlaceHolder1_A2') || $('a[id*="AddShopingCart"]')
+        || deepAll('a.btn.btn-primary.btn-block').find((b) => flowVisible(b) && /下一步/.test(b.textContent));
+      if (next) next.click();
+      return true;
+    }
+    // buyer-info：勾同意、按下一步
+    const agree = $$('input[type=checkbox]').find((c) => { const l = c.id ? $(`label[for="${CSS.escape(c.id)}"]`) : null; return l && /同意/.test(l.textContent); });
+    const nextLink = deepAll('a, button').find((b) => flowVisible(b) && /^下一步/.test(norm(b.textContent)));
+    if (!agree || !nextLink) return false;
+    if (!agree.checked) agree.click();
+    await sleep(150);
+    if (!agree.checked) return true;
+    nextLink.click();
+    return true;
+  }
+
   /* ───────────────────────── 啟動 ─────────────────────────
    * 載入時問背景程式：這個分頁是不是它開來讀資訊的？是才讀。你自己開著的活動頁，背景程式也可以直接要它讀一次。
    * 兩種情況都只讀，讀完把整理好的資訊交回去。 */
@@ -1093,8 +1304,19 @@
 
   (async () => {
     let r = null;
-    try { r = await chrome.runtime.sendMessage({ type: 'info-hello', payload: { url: location.href } }); } catch (_) { return; }
+    // 背景程式剛被鬧鐘叫醒時第一次訊息可能失敗：重試幾次；還是不行就當成你自己開的頁（自動點與購票流程不依賴背景程式回應）
+    let helloOk = false;
+    for (let i = 0; i < 4 && !helloOk; i++) {
+      try { r = await chrome.runtime.sendMessage({ type: 'info-hello', payload: { url: location.href } }); helloOk = true; } catch (_) { await sleep(400); }
+    }
+    if (!helloOk) {
+      if (IbonAdapter.pageKind() === 'activity') ibonAutoWatch(); else ibonFlowWatch();
+      return;
+    }
     if (!r || !r.read) {
+      // 背景程式開來讀資訊的臨時分頁（r.read）不跑自動點：只有你自己開著的活動頁才會
+      if (IbonAdapter.pageKind() === 'activity') ibonAutoWatch();
+      else ibonFlowWatch();
       // 人工操作模式綁著這個分頁：每次換頁都讀一次交給背景程式核對
       let g = null;
       try { g = await chrome.runtime.sendMessage({ type: 'guide-hello', payload: { url: location.href } }); } catch (_) { return; }

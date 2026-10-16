@@ -51,8 +51,19 @@
 
   (async () => {
     let r = null;
-    try { r = await chrome.runtime.sendMessage({ type: 'info-hello', payload: { url: location.href } }); } catch (_) { return; }
+    // 背景程式剛被鬧鐘叫醒時第一次訊息可能失敗：重試幾次；還是不行就當成你自己開的頁（自動點與購票流程不依賴背景程式回應）
+    let helloOk = false;
+    for (let i = 0; i < 4 && !helloOk; i++) {
+      try { r = await chrome.runtime.sendMessage({ type: 'info-hello', payload: { url: location.href } }); helloOk = true; } catch (_) { await sleep(400); }
+    }
+    if (!helloOk) {
+      if (IbonAdapter.pageKind() === 'activity') ibonAutoWatch(); else ibonFlowWatch();
+      return;
+    }
     if (!r || !r.read) {
+      // 背景程式開來讀資訊的臨時分頁（r.read）不跑自動點：只有你自己開著的活動頁才會
+      if (IbonAdapter.pageKind() === 'activity') ibonAutoWatch();
+      else ibonFlowWatch();
       // 人工操作模式綁著這個分頁：每次換頁都讀一次交給背景程式核對
       let g = null;
       try { g = await chrome.runtime.sendMessage({ type: 'guide-hello', payload: { url: location.href } }); } catch (_) { return; }
