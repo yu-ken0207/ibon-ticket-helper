@@ -6,3 +6,4 @@ preset.json
 node_modules/
 __pycache__/
 tools/targets.local.json
+.claude/settings.local.json
