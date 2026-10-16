@@ -2,7 +2,7 @@
  * alert-hook.js —— 跑在 MAIN world（與 ibon 頁面共用同一個 JS 環境），document_start 就載入
  *
  * ibon 用 alert() 回報「已售完」「請先登入」這類結果，擴充功能的 ISOLATED world 接不到。
- * 做兩件事：
+ * 做三件事（第 3 件在下面網路請求那一段）：
  *   1. 記下網站呼叫 alert / confirm 時的文字，用 postMessage 轉給 page-agent.js。
  *      平常照原本的樣子顯示對話框。只有 page-agent.js 按下去、等結果的那幾秒（它送 catch 過來）才接管：
  *      alert 不跳出來（不然整個頁面會停住，要你按確定才繼續）；confirm 照 kktix 助手的做法，
@@ -38,6 +38,35 @@
     tell(msg, 'confirm', { caught: false });
     return origConfirm.apply(this, arguments);
   };
+
+  /*
+   * 3. 數頁面自己還沒回來的網路請求（XHR、fetch），轉給 page-agent.js 判斷「ibon 的背景更新做完了沒」：
+   *    選了張數、勾了同意之後，等請求都回來再按下一步，不用固定等一段時間。只數不改：請求照原樣送出、照原樣回來。
+   *    送過去的是每個還在跑的請求的開始時間，page-agent.js 自己決定太久沒回的（常駐連線之類）不算。
+   */
+  const active = new Map();   // 請求 → 開始時間
+  let seq = 0;
+  const reportNet = () => {
+    try { window.postMessage({ __ith: 'net', starts: [...active.values()].slice(-20), at: Date.now() }, location.origin); } catch (_) { /* 轉不出去就算了 */ }
+  };
+  const begin = () => { const id = ++seq; active.set(id, Date.now()); reportNet(); return id; };
+  const end = (id) => { if (active.delete(id)) reportNet(); };
+  const origSend = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.send = function () {
+    const id = begin();
+    this.addEventListener('loadend', () => end(id), { once: true });
+    try { return origSend.apply(this, arguments); } catch (e) { end(id); throw e; }
+  };
+  const origFetch = window.fetch;
+  if (typeof origFetch === 'function') {
+    window.fetch = function () {
+      const id = begin();
+      let p;
+      try { p = origFetch.apply(this, arguments); } catch (e) { end(id); throw e; }
+      p.then(() => end(id), () => end(id));
+      return p;
+    };
+  }
 
   window.addEventListener('message', (ev) => {
     if (ev.source !== window || ev.origin !== location.origin) return;

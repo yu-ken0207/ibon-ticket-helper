@@ -31,21 +31,26 @@
   /** 選票區頁：照關鍵字、排除字選票區；之前售完過的票區（d.failedAreas）跳過 */
   async function runArea(cfg, d = {}) {
     setStatus('選票區中…', 'ok');
-    const t0 = Date.now();
-    let rows = areaRows();
-    while (!rows.length && Date.now() - t0 < 20000 && !state.aborted) {
-      // 有些活動票區與張數在同一頁：直接照座位/數量頁的做法
-      if (qtyPrice() || qtySelects().length) { log('這一頁直接出現張數，票區與張數在同一頁'); return runQty(cfg, d); }
-      if (challengeText()) {
-        if (!(await waitChallenge(60000))) return finish(false, 'challenge', 'ibon 的「正在驗證您是否是人類」一分鐘還沒通過，請你自己看畫面', { handOff: true });
-        continue;
-      }
-      const b = blockerText();
-      if (b) return finish(false, 'blocked-page', `頁面出現「${b}」，助手不處理，請你自己操作`, { handOff: true });
-      await sleep(300);
-      rows = areaRows();
+    const deadline = Date.now() + 20000;
+    let rows = [];
+    for (;;) {
+      const got = await waitFor(() => {
+        // 有些活動票區與張數在同一頁：直接照座位/數量頁的做法
+        if (qtyPrice() || qtySelects().length) return { kind: 'qty' };
+        const r = areaRows();
+        return r.length ? { kind: 'rows', rows: r } : null;
+      }, Math.max(0, deadline - Date.now()), () => {
+        if (challengeText()) return { kind: 'challenge' };
+        const b = blockerText();
+        return b ? { kind: 'blocker', text: b } : null;
+      });
+      if (!got) break;
+      if (got.kind === 'qty') { log('這一頁直接出現張數，票區與張數在同一頁'); return runQty(cfg, d); }
+      if (got.kind === 'rows') { rows = got.rows; break; }
+      if (got.kind === 'blocker') return finish(false, 'blocked-page', `頁面出現「${got.text}」，助手不處理，請你自己操作`, { handOff: true });
+      if (!(await waitChallenge(60000))) return finish(false, 'challenge', 'ibon 的「正在驗證您是否是人類」一分鐘還沒通過，請你自己看畫面', { handOff: true });
     }
-    if (state.aborted) return;
+    if (state.aborted || state.leaving) return;
     if (!rows.length) return finish(false, 'no-area-table', '票區頁一直沒有出現票區表格。可能是 ibon 改版了，請直接看畫面', { handOff: true });
     const qty = Math.max(1, Math.min(Number(cfg.qty) || 1, 10));
     const failed = d.failedAreas || [];
@@ -62,7 +67,7 @@
       return finish(false, 'no-match', `關鍵字比對不到任何票區。頁面上的票區有：${texts.join(' ／ ')}${ex}。請自己選`, { handOff: true });
     }
     if (pick.kind === 'fallback') log(`關鍵字都沒比對到，照遞補設定改選第一個還能買的：${pick.text}`, 'warn');
-    else log(`選中票區：${pick.text}`);
+    else log(`選中票區：${pick.text}（${pageAge()}）`);
     const row = rows[pick.index];
     const out = await clickAndWatch(row.querySelector('a[href], a[onclick]') || row, 30000, '正在處理票區');
     if (out.kind === 'alert') return handleAlert(out, '選票區', { areaText: infos[pick.index].name });

@@ -31,6 +31,8 @@
     aborted: false,
     running: false,
     alerts: [],           // MAIN world 的 alert-hook.js 轉來的網站訊息
+    netStarts: [],        // 頁面自己還沒回來的網路請求的開始時間（alert-hook.js 轉來的）
+    leaving: false,       // 頁面開始離開了（按了換頁的東西）：舊頁面上的助手不要再動作
     panel: null,
     mode: null,
   };
@@ -74,6 +76,16 @@
     return out.join('').split('\n').map((l) => l.replace(/[ \t　]+/g, ' ').trim()).filter(Boolean).join('\n');
   }
 
+  /** 頁面自己的背景更新還在跑嗎：5 秒內開始、還沒回來的請求才算（太久沒回的多半是常駐連線，不是這次的更新） */
+  const NET_BUSY_MS = 5000;
+  function netBusy() {
+    const t = Date.now();
+    return state.netStarts.some((s) => t - s < NET_BUSY_MS);
+  }
+
+  /** 這一頁從開始載入到現在多久（毫秒），寫在紀錄裡看每一步花多少時間 */
+  const pageAge = () => `這一頁載入後 ${Math.round(performance.now())} ms`;
+
   /** 頁面種類（判讀寫在 lib/urls.js） */
   function pageKind() {
     return pageKindOf(location.href);
@@ -109,6 +121,7 @@
   window.addEventListener('message', (ev) => {
     if (ev.source !== window || ev.origin !== location.origin) return;
     const d = ev.data;
+    if (d && d.__ith === 'net' && Array.isArray(d.starts)) { state.netStarts = d.starts.filter(Number.isFinite); return; }
     if (!d || d.__ith !== 'alert' || typeof d.msg !== 'string') return;
     const msg = d.msg.slice(0, 300);
     state.alerts.push(msg);
@@ -116,6 +129,11 @@
     if (d.kind === 'confirm' && d.caught) log(`ibon 詢問「${msg.slice(0, 60)}」，助手按了${d.answer ? '確定' : '否'}`, 'warn');
     else if (d.caught) log(`ibon 訊息：「${msg.slice(0, 80)}」`, 'warn');
   });
+
+  // 按了換頁的東西（下一步、__doPostBack）：頁面開始離開時舊頁面還能操作一陣子，這段時間不要再動作
+  window.addEventListener('beforeunload', () => { state.leaving = true; });
+  window.addEventListener('pagehide', () => { state.leaving = true; });
+  window.addEventListener('pageshow', (ev) => { if (ev.persisted) state.leaving = false; });
 
   function log(msg, level = 'info') {
     send('log', { msg: String(msg), level });
@@ -730,6 +748,26 @@
     setTimeout(() => { if (el.getAttribute('data-ith-click') === token) { el.removeAttribute('data-ith-click'); el.click(); } }, 500);
   }
 
+  /**
+   * 先跟購票網站建好連線（DNS、TCP、TLS）：開賣後從活動頁跳到 orders.ibon.com.tw 時，第一次連線不用再握手。
+   * 只是給瀏覽器的提示（<link rel="preconnect">），不送任何請求內容。Chrome 閒置的預先連線大約十秒會關掉，
+   * 所以在開賣前幾秒、和開賣後活動頁一載入時各加一次。
+   */
+  function preconnectOrders() {
+    try {
+      const head = document.head || document.documentElement;
+      for (const rel of ['dns-prefetch', 'preconnect']) {
+        const old = head.querySelector(`link[rel="${rel}"][data-ith]`);
+        if (old) old.remove();   // 拿掉再加，瀏覽器才會再建一次連線
+        const l = document.createElement('link');
+        l.rel = rel;
+        l.href = 'https://orders.ibon.com.tw';
+        l.setAttribute('data-ith', '1');
+        head.appendChild(l);
+      }
+    } catch (_) { /* 加不了就算了，只是少了加速 */ }
+  }
+
   /** 在下拉裡設值並通知網頁（ASP.NET 的 onchange 會跟著動） */
   function setSelect(sel, value) {
     sel.value = String(value);
@@ -987,15 +1025,53 @@
     await call('result', { ok, kind, msg, url: location.href, handOff: !!extra.handOff }, 1500);
   }
 
+  /**
+   * 等到 cond() 回傳真值，回傳那個值；逾時、取消或頁面開始離開回 null。
+   * 頁面一有變動就馬上再看一次（MutationObserver，同一批變動只看一次）；封閉 Shadow DOM 裡的變動觀察不到
+   * （ibon 的場次表、票區表都在裡面），所以另外每 50 毫秒看一次。
+   * slow() 是比較重的檢查（找排隊、人類驗證的字樣要讀整頁文字），每 slowEvery 毫秒才看一次，回傳真值也會結束等待。
+   */
+  function waitFor(cond, maxMs, slow = null, slowEvery = 500) {
+    return new Promise((resolve) => {
+      const t0 = Date.now();
+      let done = false;
+      let timer = 0;
+      let queued = false;
+      let slowAt = 0;
+      const obs = new MutationObserver(() => {
+        if (queued || done) return;
+        queued = true;
+        setTimeout(() => { queued = false; check(); }, 0);
+      });
+      const stop = (v) => {
+        if (done) return;
+        done = true;
+        obs.disconnect();
+        clearTimeout(timer);
+        resolve(v);
+      };
+      function check() {
+        if (done) return;
+        if (state.aborted || state.leaving) { stop(null); return; }
+        const v = cond();
+        if (v) { stop(v); return; }
+        if (slow && Date.now() - slowAt >= slowEvery) {
+          slowAt = Date.now();
+          const w = slow();
+          if (w) { stop(w); return; }
+        }
+        if (Date.now() - t0 >= maxMs) stop(null);
+      }
+      obs.observe(document.documentElement || document, { childList: true, subtree: true, attributes: true, characterData: true });
+      const tick = () => { check(); if (!done) timer = setTimeout(tick, 50); };
+      tick();
+    });
+  }
+
   /** 等場次表出現（最多 maxMs），回傳列 */
   async function waitSessions(maxMs) {
-    const t0 = Date.now();
-    let rows = sessionRows();
-    while (!rows.length && Date.now() - t0 < maxMs && !state.aborted) {
-      await sleep(300);
-      rows = sessionRows();
-    }
-    return rows;
+    const rows = await waitFor(() => { const r = sessionRows(); return r.length ? r : null; }, maxMs);
+    return rows || [];
   }
 
   /** 重新整理再試一次：次數與間隔由背景程式決定 */
@@ -1035,11 +1111,13 @@
   }
 
   /**
-   * 等頁面安靜下來：選了張數、勾了同意之後，ibon 會在背景更新頁面（重算金額、重畫表格）。
-   * 更新到一半就按下一步，兩個請求撞在一起，ibon 會一直轉圈（2026-10-16 實測：選張數與按下一步只隔 4 毫秒就卡住）。
-   * 所以先等「連續 quietMs 毫秒沒有任何頁面變動」，最多等 maxMs；至少等 minMs，讓網頁的 change 事件有時間開始動作。
+   * 等 ibon 的背景更新做完：選了張數、勾了同意之後，ibon 可能在背景送請求更新頁面（重算金額、重畫表格）。
+   * 更新到一半就按下一步，兩個請求可能撞在一起（2026-10-16 選張數到按下一步只隔 4 毫秒時一直轉圈）。
+   * 做完的條件：頁面自己的網路請求都回來了（alert-hook.js 數的）、而且連續 quietMs 毫秒沒有畫面變動；
+   * 至少等 minMs，讓網頁的 change 事件有時間把請求送出去。最多等 maxMs。頁面開始離開就馬上結束。
+   * 0.9.4 以前是固定至少等 0.8 秒，這裡改成看請求，通常幾百毫秒就好。
    */
-  function settle(quietMs = 400, maxMs = 6000, minMs = 300) {
+  function settle(quietMs = 150, maxMs = 8000, minMs = 250) {
     return new Promise((resolve) => {
       const t0 = Date.now();
       let last = Date.now();
@@ -1047,8 +1125,9 @@
       obs.observe(document.documentElement, { childList: true, subtree: true, attributes: true, characterData: true });
       const tick = () => {
         const t = Date.now();
-        if ((t - t0 >= minMs && t - last >= quietMs) || t - t0 >= maxMs) { obs.disconnect(); resolve(t - t0); return; }
-        setTimeout(tick, 50);
+        const quiet = t - t0 >= minMs && t - last >= quietMs && !netBusy();
+        if (quiet || state.leaving || state.aborted || t - t0 >= maxMs) { obs.disconnect(); resolve(t - t0); return; }
+        setTimeout(tick, 25);
       };
       tick();
     });
@@ -1060,6 +1139,7 @@
     let shown = 0;
     while (Date.now() - t0 < maxMs && !state.aborted) {
       if (state.alerts.length > alertBefore) return { kind: 'alert', msg: state.alerts[state.alerts.length - 1] };
+      if (state.leaving) return { kind: 'leaving' };   // 換頁了：由新頁面接手
       const sec = Math.floor((Date.now() - t0) / 1000);
       if (sec >= 3 && sec !== shown) { shown = sec; setStatus(`ibon ${label}，已等 ${sec} 秒…先不要重新整理`, 'ok'); }
       await sleep(200);
@@ -1231,6 +1311,9 @@
       await call('fired', { at: Date.now(), drift: Math.round(now() - fireAt) }, 800);
       return runFlow({ cfg, since: Date.now() });
     }
+    // 開賣前 3 秒先跟 orders.ibon.com.tw 建好連線，開賣後跳到購票頁時省掉握手時間
+    if (!(await waitUntil(fireAt - 3000))) return;
+    preconnectOrders();
     // 開賣前 0.3 秒先跟背景程式報備「要重新整理了」，等它回覆；到點時就不用再等，重新整理可以立刻發出
     if (!(await waitUntil(fireAt - 300))) return;
     await call('fired', { at: Date.now(), drift: null }, 800);
@@ -1246,6 +1329,7 @@
   /** 活動頁：找你選的場次，「線上購票」可按就點；還不能按就照尚未開賣重試 */
   async function runEvent(cfg, d) {
     setStatus('找場次中…', 'ok');
+    preconnectOrders();   // 等場次表的同時先跟購票網站建好連線
     let rows = await waitSessions(15000);
     if (state.aborted) return;
     if (!rows.length && challengeText()) {
@@ -1274,7 +1358,7 @@
     if (!btn || st.status !== 'on-sale') {
       return retry('not-open', `場次「${sessionKey(cfg.sessionWhen)}」還不能買（按鈕：${info.button || '沒有'}${info.disabled ? '，灰的' : ''}）`);
     }
-    log(`場次「${sessionKey(cfg.sessionWhen)}」可以買了，按下「${info.button}」`);
+    log(`場次「${sessionKey(cfg.sessionWhen)}」可以買了，按下「${info.button}」（${pageAge()}）`);
     setStatus('按下線上購票…', 'ok');
     const out = await clickAndWatch(btn, 20000, '正在進入購票流程');
     if (out.kind === 'alert') return handleAlert(out, '按下線上購票');
@@ -1323,21 +1407,26 @@
   /** 選票區頁：照關鍵字、排除字選票區；之前售完過的票區（d.failedAreas）跳過 */
   async function runArea(cfg, d = {}) {
     setStatus('選票區中…', 'ok');
-    const t0 = Date.now();
-    let rows = areaRows();
-    while (!rows.length && Date.now() - t0 < 20000 && !state.aborted) {
-      // 有些活動票區與張數在同一頁：直接照座位/數量頁的做法
-      if (qtyPrice() || qtySelects().length) { log('這一頁直接出現張數，票區與張數在同一頁'); return runQty(cfg, d); }
-      if (challengeText()) {
-        if (!(await waitChallenge(60000))) return finish(false, 'challenge', 'ibon 的「正在驗證您是否是人類」一分鐘還沒通過，請你自己看畫面', { handOff: true });
-        continue;
-      }
-      const b = blockerText();
-      if (b) return finish(false, 'blocked-page', `頁面出現「${b}」，助手不處理，請你自己操作`, { handOff: true });
-      await sleep(300);
-      rows = areaRows();
+    const deadline = Date.now() + 20000;
+    let rows = [];
+    for (;;) {
+      const got = await waitFor(() => {
+        // 有些活動票區與張數在同一頁：直接照座位/數量頁的做法
+        if (qtyPrice() || qtySelects().length) return { kind: 'qty' };
+        const r = areaRows();
+        return r.length ? { kind: 'rows', rows: r } : null;
+      }, Math.max(0, deadline - Date.now()), () => {
+        if (challengeText()) return { kind: 'challenge' };
+        const b = blockerText();
+        return b ? { kind: 'blocker', text: b } : null;
+      });
+      if (!got) break;
+      if (got.kind === 'qty') { log('這一頁直接出現張數，票區與張數在同一頁'); return runQty(cfg, d); }
+      if (got.kind === 'rows') { rows = got.rows; break; }
+      if (got.kind === 'blocker') return finish(false, 'blocked-page', `頁面出現「${got.text}」，助手不處理，請你自己操作`, { handOff: true });
+      if (!(await waitChallenge(60000))) return finish(false, 'challenge', 'ibon 的「正在驗證您是否是人類」一分鐘還沒通過，請你自己看畫面', { handOff: true });
     }
-    if (state.aborted) return;
+    if (state.aborted || state.leaving) return;
     if (!rows.length) return finish(false, 'no-area-table', '票區頁一直沒有出現票區表格。可能是 ibon 改版了，請直接看畫面', { handOff: true });
     const qty = Math.max(1, Math.min(Number(cfg.qty) || 1, 10));
     const failed = d.failedAreas || [];
@@ -1354,7 +1443,7 @@
       return finish(false, 'no-match', `關鍵字比對不到任何票區。頁面上的票區有：${texts.join(' ／ ')}${ex}。請自己選`, { handOff: true });
     }
     if (pick.kind === 'fallback') log(`關鍵字都沒比對到，照遞補設定改選第一個還能買的：${pick.text}`, 'warn');
-    else log(`選中票區：${pick.text}`);
+    else log(`選中票區：${pick.text}（${pageAge()}）`);
     const row = rows[pick.index];
     const out = await clickAndWatch(row.querySelector('a[href], a[onclick]') || row, 30000, '正在處理票區');
     if (out.kind === 'alert') return handleAlert(out, '選票區', { areaText: infos[pick.index].name });
@@ -1419,8 +1508,10 @@
     if (stop) { await stop; return false; }
     log(pick.kind === 'fallback' ? `關鍵字都沒比對到，改選第一個還能買的：${pick.text}` : `選中票區：${pick.text}`, pick.kind === 'fallback' ? 'warn' : 'info');
     if (!setSelect(price, opts[pick.index].value)) { await finish(false, 'fill-failed', '票區價格選不起來', { handOff: true }); return false; }
-    await sleep(4000);   // ibon 會回傳重畫整頁；換頁的話這個頁面已經卸載，由新頁面接著做
-    return !state.aborted;
+    // 選了票區價格，ibon 會回傳（整頁換掉，或在背景更新張數表）：整頁換掉的話頁面開始離開就停手，由新頁面接著做；
+    // 背景更新的話等請求回來、畫面穩定再往下。0.9.4 以前是固定等 4 秒
+    await settle(150, 6000, 300);
+    return !state.aborted && !state.leaving;
   }
 
   /**
@@ -1429,17 +1520,18 @@
    */
   async function runQty(cfg, d = {}) {
     setStatus('選張數中…', 'ok');
-    const t0 = Date.now();
-    while (!qtyPrice() && !qtySelects().length && Date.now() - t0 < 20000 && !state.aborted) {
-      const b = blockerText();
-      if (challengeText()) {
-        if (!(await waitChallenge(60000))) return finish(false, 'challenge', 'ibon 的「正在驗證您是否是人類」一分鐘還沒通過，請你自己看畫面', { handOff: true });
-        continue;
-      }
-      if (b && !qtyCaptcha()) return finish(false, 'blocked-page', `頁面出現「${b}」，助手不處理，請你自己操作`, { handOff: true });
-      await sleep(300);
+    const deadline = Date.now() + 20000;
+    for (;;) {
+      const got = await waitFor(() => (qtyPrice() || qtySelects().length ? { kind: 'ready' } : null), Math.max(0, deadline - Date.now()), () => {
+        if (challengeText()) return { kind: 'challenge' };
+        const b = blockerText();
+        return b && !qtyCaptcha() ? { kind: 'blocker', text: b } : null;
+      });
+      if (!got || got.kind === 'ready') break;
+      if (got.kind === 'blocker') return finish(false, 'blocked-page', `頁面出現「${got.text}」，助手不處理，請你自己操作`, { handOff: true });
+      if (!(await waitChallenge(60000))) return finish(false, 'challenge', 'ibon 的「正在驗證您是否是人類」一分鐘還沒通過，請你自己看畫面', { handOff: true });
     }
-    if (state.aborted) return;
+    if (state.aborted || state.leaving) return;
     const failed = [...(d.failedAreas || [])];
     for (let round = 0; round < 5; round++) {
       const price = qtyPrice();
@@ -1467,19 +1559,20 @@
     const want = Math.max(1, Math.min(Number(cfg.qty) || 1, 10));
     if (Math.max(...have) < want) return finish(false, 'qty-limit', `你要 ${want} 張，但這個票區最多只能選 ${Math.max(...have)} 張。請自己決定要不要買`, { handOff: true });
     if (!setSelect(sel, want)) return finish(false, 'fill-failed', `張數選不到 ${want}`, { handOff: true });
-    log(`已選張數 ${want}`);
-    // 等 ibon 的背景更新做完；更新後如果張數被重置了就再選一次（最多三輪）
+    log(`已選張數 ${want}（${pageAge()}）`);
+    // 等 ibon 的背景更新做完（請求回來、畫面穩定）；更新後如果張數被重置了就再選一次（最多三輪）
     let stable = false;
     for (let i = 0; i < 3 && !stable; i++) {
-      await settle(500, 8000, 800);   // 至少等 0.8 秒：ibon 的背景更新不一定一變動就開始
-      if (state.aborted) return;
+      await settle();
+      if (state.aborted || state.leaving) return;
       const cur = qtySelects()[0];
       if (cur && Number(cur.value) === want) { stable = true; break; }
       if (!cur || !setSelect(cur, want)) return finish(false, 'fill-failed', `張數被頁面重置，重選 ${want} 失敗，請自己選`, { handOff: true });
       log(`頁面更新後張數被重置，重選 ${want}`, 'warn');
     }
     if (!stable) {
-      await settle(500, 8000, 800);
+      await settle();
+      if (state.aborted || state.leaving) return;
       const cur = qtySelects()[0];
       if (!cur || Number(cur.value) !== want) return finish(false, 'fill-failed', `張數一直被頁面重置，選不住 ${want}，請自己選`, { handOff: true });
     }
@@ -1487,8 +1580,8 @@
       const box = qtyNonAdjacent();
       if (box && !box.checked) {
         pageClick(box);
-        await sleep(150);
-        if (box.checked) { log('已勾選「接受不連號座位」'); await settle(500, 4000, 400); }
+        if (!box.checked) await sleep(50);
+        if (box.checked) { log('已勾選「接受不連號座位」'); await settle(150, 4000, 200); }
         else log('「接受不連號座位」勾不起來，照連號的座位買', 'warn');
       }
     }
@@ -1498,7 +1591,7 @@
     }
     const next = qtyNext();
     if (!next) return finish(false, 'no-next', '找不到「下一步」按鈕，請自己按', { handOff: true });
-    log('按下「下一步」');
+    log(`按下「下一步」（${pageAge()}）`);
     setStatus('已按下一步…', 'ok');
     const out = await clickAndWatch(next, 45000, '正在處理（可能在排隊或配位）');
     if (out.kind === 'alert') return handleAlert(out, '按下一步', { areaText: qtyAreaText(), areaUrl: d.areaUrl });
@@ -1521,9 +1614,8 @@
     setStatus('填購票資訊頁…', 'ok');
     const left = buyerCountdown();
     send('warn', { kind: 'held', msg: `名額已保留${left ? `（ibon 顯示${left}）` : ''}。助手會勾同意並按下一步；確認訂單與付款請你自己來，保留有時間限制` });
-    const t0 = Date.now();
-    while ((!buyerAgree() || !buyerNext()) && Date.now() - t0 < 15000 && !state.aborted) await sleep(300);
-    if (state.aborted) return;
+    await waitFor(() => buyerAgree() && buyerNext(), 15000);
+    if (state.aborted || state.leaving) return;
     const agree = buyerAgree();
     const next = buyerNext();
     if (!agree || !next) return finish(false, 'no-buyer-form', '找不到「同意」或「下一步」，請自己操作（名額已保留，注意剩餘時間）', { handOff: true });
@@ -1532,17 +1624,17 @@
       return finish(false, 'agree', '你設定不自動勾選同意。請自己閱讀後勾選並按下一步', { handOff: true });
     }
     if (!agree.checked) pageClick(agree);
-    await sleep(150);
+    if (!agree.checked) await sleep(50);   // click() 通常當下就勾好了，沒勾到才稍等再看
     if (!agree.checked) return finish(false, 'agree-failed', '同意條款勾不起來，請自己勾選', { handOff: true });
     log('已勾選同意約款');
-    await settle(500, 4000, 600);   // 勾選後 ibon 可能在背景更新頁面，等安靜了再按下一步
-    if (state.aborted) return;
+    await settle(150, 4000, 200);   // 勾選後 ibon 可能在背景更新頁面：等請求回來、畫面穩定再按下一步
+    if (state.aborted || state.leaving) return;
     if (/實名制/.test(visibleText())) {
       // 實名制要填持票人資料，助手不替你填（tickets_hunter 遇到實名制也不按下一步）
       handToUser(next);
       return finish(false, 'name-based', '這場是實名制，請自己填寫持票人資料後按下一步（名額已保留，注意剩餘時間）', { handOff: true });
     }
-    log('按下「下一步」');
+    log(`按下「下一步」（${pageAge()}）`);
     const out = await clickAndWatch(next, 45000, '正在處理');
     // 這一頁名額已經保留：被網站擋下時不重新整理（重新整理可能弄丟保留的名額），交給你看
     if (out.kind === 'alert') return finish(false, 'rejected', `按下一步時 ibon 回覆「${out.msg}」。名額還在保留中，請自己看畫面，先不要重新整理`, { handOff: true });

@@ -143,6 +143,26 @@
     setTimeout(() => { if (el.getAttribute('data-ith-click') === token) { el.removeAttribute('data-ith-click'); el.click(); } }, 500);
   }
 
+  /**
+   * 先跟購票網站建好連線（DNS、TCP、TLS）：開賣後從活動頁跳到 orders.ibon.com.tw 時，第一次連線不用再握手。
+   * 只是給瀏覽器的提示（<link rel="preconnect">），不送任何請求內容。Chrome 閒置的預先連線大約十秒會關掉，
+   * 所以在開賣前幾秒、和開賣後活動頁一載入時各加一次。
+   */
+  function preconnectOrders() {
+    try {
+      const head = document.head || document.documentElement;
+      for (const rel of ['dns-prefetch', 'preconnect']) {
+        const old = head.querySelector(`link[rel="${rel}"][data-ith]`);
+        if (old) old.remove();   // 拿掉再加，瀏覽器才會再建一次連線
+        const l = document.createElement('link');
+        l.rel = rel;
+        l.href = 'https://orders.ibon.com.tw';
+        l.setAttribute('data-ith', '1');
+        head.appendChild(l);
+      }
+    } catch (_) { /* 加不了就算了，只是少了加速 */ }
+  }
+
   /** 在下拉裡設值並通知網頁（ASP.NET 的 onchange 會跟著動） */
   function setSelect(sel, value) {
     sel.value = String(value);

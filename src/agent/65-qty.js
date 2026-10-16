@@ -55,8 +55,10 @@
     if (stop) { await stop; return false; }
     log(pick.kind === 'fallback' ? `關鍵字都沒比對到，改選第一個還能買的：${pick.text}` : `選中票區：${pick.text}`, pick.kind === 'fallback' ? 'warn' : 'info');
     if (!setSelect(price, opts[pick.index].value)) { await finish(false, 'fill-failed', '票區價格選不起來', { handOff: true }); return false; }
-    await sleep(4000);   // ibon 會回傳重畫整頁；換頁的話這個頁面已經卸載，由新頁面接著做
-    return !state.aborted;
+    // 選了票區價格，ibon 會回傳（整頁換掉，或在背景更新張數表）：整頁換掉的話頁面開始離開就停手，由新頁面接著做；
+    // 背景更新的話等請求回來、畫面穩定再往下。0.9.4 以前是固定等 4 秒
+    await settle(150, 6000, 300);
+    return !state.aborted && !state.leaving;
   }
 
   /**
@@ -65,17 +67,18 @@
    */
   async function runQty(cfg, d = {}) {
     setStatus('選張數中…', 'ok');
-    const t0 = Date.now();
-    while (!qtyPrice() && !qtySelects().length && Date.now() - t0 < 20000 && !state.aborted) {
-      const b = blockerText();
-      if (challengeText()) {
-        if (!(await waitChallenge(60000))) return finish(false, 'challenge', 'ibon 的「正在驗證您是否是人類」一分鐘還沒通過，請你自己看畫面', { handOff: true });
-        continue;
-      }
-      if (b && !qtyCaptcha()) return finish(false, 'blocked-page', `頁面出現「${b}」，助手不處理，請你自己操作`, { handOff: true });
-      await sleep(300);
+    const deadline = Date.now() + 20000;
+    for (;;) {
+      const got = await waitFor(() => (qtyPrice() || qtySelects().length ? { kind: 'ready' } : null), Math.max(0, deadline - Date.now()), () => {
+        if (challengeText()) return { kind: 'challenge' };
+        const b = blockerText();
+        return b && !qtyCaptcha() ? { kind: 'blocker', text: b } : null;
+      });
+      if (!got || got.kind === 'ready') break;
+      if (got.kind === 'blocker') return finish(false, 'blocked-page', `頁面出現「${got.text}」，助手不處理，請你自己操作`, { handOff: true });
+      if (!(await waitChallenge(60000))) return finish(false, 'challenge', 'ibon 的「正在驗證您是否是人類」一分鐘還沒通過，請你自己看畫面', { handOff: true });
     }
-    if (state.aborted) return;
+    if (state.aborted || state.leaving) return;
     const failed = [...(d.failedAreas || [])];
     for (let round = 0; round < 5; round++) {
       const price = qtyPrice();
@@ -103,19 +106,20 @@
     const want = Math.max(1, Math.min(Number(cfg.qty) || 1, 10));
     if (Math.max(...have) < want) return finish(false, 'qty-limit', `你要 ${want} 張，但這個票區最多只能選 ${Math.max(...have)} 張。請自己決定要不要買`, { handOff: true });
     if (!setSelect(sel, want)) return finish(false, 'fill-failed', `張數選不到 ${want}`, { handOff: true });
-    log(`已選張數 ${want}`);
-    // 等 ibon 的背景更新做完；更新後如果張數被重置了就再選一次（最多三輪）
+    log(`已選張數 ${want}（${pageAge()}）`);
+    // 等 ibon 的背景更新做完（請求回來、畫面穩定）；更新後如果張數被重置了就再選一次（最多三輪）
     let stable = false;
     for (let i = 0; i < 3 && !stable; i++) {
-      await settle(500, 8000, 800);   // 至少等 0.8 秒：ibon 的背景更新不一定一變動就開始
-      if (state.aborted) return;
+      await settle();
+      if (state.aborted || state.leaving) return;
       const cur = qtySelects()[0];
       if (cur && Number(cur.value) === want) { stable = true; break; }
       if (!cur || !setSelect(cur, want)) return finish(false, 'fill-failed', `張數被頁面重置，重選 ${want} 失敗，請自己選`, { handOff: true });
       log(`頁面更新後張數被重置，重選 ${want}`, 'warn');
     }
     if (!stable) {
-      await settle(500, 8000, 800);
+      await settle();
+      if (state.aborted || state.leaving) return;
       const cur = qtySelects()[0];
       if (!cur || Number(cur.value) !== want) return finish(false, 'fill-failed', `張數一直被頁面重置，選不住 ${want}，請自己選`, { handOff: true });
     }
@@ -123,8 +127,8 @@
       const box = qtyNonAdjacent();
       if (box && !box.checked) {
         pageClick(box);
-        await sleep(150);
-        if (box.checked) { log('已勾選「接受不連號座位」'); await settle(500, 4000, 400); }
+        if (!box.checked) await sleep(50);
+        if (box.checked) { log('已勾選「接受不連號座位」'); await settle(150, 4000, 200); }
         else log('「接受不連號座位」勾不起來，照連號的座位買', 'warn');
       }
     }
@@ -134,7 +138,7 @@
     }
     const next = qtyNext();
     if (!next) return finish(false, 'no-next', '找不到「下一步」按鈕，請自己按', { handOff: true });
-    log('按下「下一步」');
+    log(`按下「下一步」（${pageAge()}）`);
     setStatus('已按下一步…', 'ok');
     const out = await clickAndWatch(next, 45000, '正在處理（可能在排隊或配位）');
     if (out.kind === 'alert') return handleAlert(out, '按下一步', { areaText: qtyAreaText(), areaUrl: d.areaUrl });

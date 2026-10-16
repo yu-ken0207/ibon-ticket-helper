@@ -30,6 +30,8 @@
     aborted: false,
     running: false,
     alerts: [],           // MAIN world 的 alert-hook.js 轉來的網站訊息
+    netStarts: [],        // 頁面自己還沒回來的網路請求的開始時間（alert-hook.js 轉來的）
+    leaving: false,       // 頁面開始離開了（按了換頁的東西）：舊頁面上的助手不要再動作
     panel: null,
     mode: null,
   };
@@ -73,6 +75,16 @@
     return out.join('').split('\n').map((l) => l.replace(/[ \t　]+/g, ' ').trim()).filter(Boolean).join('\n');
   }
 
+  /** 頁面自己的背景更新還在跑嗎：5 秒內開始、還沒回來的請求才算（太久沒回的多半是常駐連線，不是這次的更新） */
+  const NET_BUSY_MS = 5000;
+  function netBusy() {
+    const t = Date.now();
+    return state.netStarts.some((s) => t - s < NET_BUSY_MS);
+  }
+
+  /** 這一頁從開始載入到現在多久（毫秒），寫在紀錄裡看每一步花多少時間 */
+  const pageAge = () => `這一頁載入後 ${Math.round(performance.now())} ms`;
+
   /** 頁面種類（判讀寫在 lib/urls.js） */
   function pageKind() {
     return pageKindOf(location.href);
@@ -108,6 +120,7 @@
   window.addEventListener('message', (ev) => {
     if (ev.source !== window || ev.origin !== location.origin) return;
     const d = ev.data;
+    if (d && d.__ith === 'net' && Array.isArray(d.starts)) { state.netStarts = d.starts.filter(Number.isFinite); return; }
     if (!d || d.__ith !== 'alert' || typeof d.msg !== 'string') return;
     const msg = d.msg.slice(0, 300);
     state.alerts.push(msg);
@@ -115,6 +128,11 @@
     if (d.kind === 'confirm' && d.caught) log(`ibon 詢問「${msg.slice(0, 60)}」，助手按了${d.answer ? '確定' : '否'}`, 'warn');
     else if (d.caught) log(`ibon 訊息：「${msg.slice(0, 80)}」`, 'warn');
   });
+
+  // 按了換頁的東西（下一步、__doPostBack）：頁面開始離開時舊頁面還能操作一陣子，這段時間不要再動作
+  window.addEventListener('beforeunload', () => { state.leaving = true; });
+  window.addEventListener('pagehide', () => { state.leaving = true; });
+  window.addEventListener('pageshow', (ev) => { if (ev.persisted) state.leaving = false; });
 
   function log(msg, level = 'info') {
     send('log', { msg: String(msg), level });

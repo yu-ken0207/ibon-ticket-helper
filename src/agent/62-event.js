@@ -3,6 +3,7 @@
   /** 活動頁：找你選的場次，「線上購票」可按就點；還不能按就照尚未開賣重試 */
   async function runEvent(cfg, d) {
     setStatus('找場次中…', 'ok');
+    preconnectOrders();   // 等場次表的同時先跟購票網站建好連線
     let rows = await waitSessions(15000);
     if (state.aborted) return;
     if (!rows.length && challengeText()) {
@@ -31,7 +32,7 @@
     if (!btn || st.status !== 'on-sale') {
       return retry('not-open', `場次「${sessionKey(cfg.sessionWhen)}」還不能買（按鈕：${info.button || '沒有'}${info.disabled ? '，灰的' : ''}）`);
     }
-    log(`場次「${sessionKey(cfg.sessionWhen)}」可以買了，按下「${info.button}」`);
+    log(`場次「${sessionKey(cfg.sessionWhen)}」可以買了，按下「${info.button}」（${pageAge()}）`);
     setStatus('按下線上購票…', 'ok');
     const out = await clickAndWatch(btn, 20000, '正在進入購票流程');
     if (out.kind === 'alert') return handleAlert(out, '按下線上購票');

@@ -58,9 +58,16 @@ async function run({ url, html, directive, extra = {}, wait = 1500, alertAfter =
     if (type === 'retry') return { allow: true, delayMs: 100000, count: 1, max: 30 };
     return { ok: true };
   });
-  await page.route('**/*', (r) => (r.request().url().startsWith('https://ticket.ibon.com.tw/ActivityInfo/Details') || r.request().url().startsWith('https://orders.ibon.com.tw/application')
-    ? r.fulfill({ contentType: 'text/html; charset=utf-8', body: html })
-    : r.fulfill({ status: 204, body: '' })));
+  await page.route('**/*', (r) => {
+    const u = r.request().url();
+    // 假的「背景更新」請求：/__update?ms=600 延遲 ms 毫秒才回，模擬 ibon 選了張數後回伺服器更新
+    const m = u.match(/__update\?ms=(\d+)/);
+    if (m) return new Promise((done) => setTimeout(() => done(r.fulfill({ status: 200, body: 'ok' })), Number(m[1])));
+    if (u.startsWith('https://ticket.ibon.com.tw/ActivityInfo/Details') || u.startsWith('https://orders.ibon.com.tw/application')) {
+      return r.fulfill({ contentType: 'text/html; charset=utf-8', body: html });
+    }
+    return r.fulfill({ status: 204, body: '' });
+  });
   await page.addInitScript(`
     // 擴充功能才有的 chrome.dom.openOrClosedShadowRoot：測試裡先攔住 attachShadow，把封閉的 shadow root 也記下來
     const __roots = new WeakMap();
@@ -169,10 +176,19 @@ test('票區頁：出現流量控管字樣 → 整頁不動', { skip }, async ()
   assert.equal(result(r).kind, 'blocked-page');
 });
 
-test('座位/數量頁：票區價格還沒選 → 照關鍵字選（排除身障），之後頁面重載再選張數', { skip }, async () => {
-  const r = await run({ url: U.qty, html: qtyPage(), directive: RUN({ keywords: ['一般席'] }) });
-  assert.equal(r.title, 'price:c');
-  assert.equal(r.q, '0');   // 重載前先不選張數
+test('座位/數量頁：票區價格還沒選 → 照關鍵字選（排除身障）；選了之後 ibon 整頁換掉 → 舊頁面上不再動作', { skip }, async () => {
+  // 模擬 ibon 選了票區價格就回傳換頁（ASP.NET 的 __doPostBack）：0.1 秒後離開這一頁
+  const html = qtyPage().replace(`onchange="document.title='price:'+this.value"`, `onchange="document.title='price:'+this.value;setTimeout(()=>{location.href='about:blank'},100)"`);
+  const r = await run({ url: U.qty, html, directive: RUN({ keywords: ['一般席'] }), wait: 2500 });
+  assert.ok(r.calls.some((c) => c.type === 'log' && /選中票區：2F 一般席/.test(c.payload.msg)), JSON.stringify(r.calls.map((c) => c.type)));
+  assert.ok(!r.calls.some((c) => c.type === 'log' && /已選張數|按下「下一步」/.test(c.payload.msg)), '頁面離開後沒有在舊頁面上選張數或按下一步');
+});
+
+test('座位/數量頁：票區價格選了之後 ibon 在背景更新（沒換頁）→ 等更新回來再選張數、按下一步', { skip }, async () => {
+  const html = qtyPage().replace(`onchange="document.title='price:'+this.value"`, `onchange="fetch('/__update?ms=500')"`);
+  const r = await run({ url: U.qty, html, directive: RUN({ keywords: ['一般席'], qty: 2 }), wait: 3500 });
+  assert.equal(await r.page.evaluate(() => document.getElementById('ctl00_ContentPlaceHolder1_PRICE').value), 'c');
+  assert.equal(r.title, 'NEXT q=2');
 });
 
 test('座位/數量頁：票區已選 → 選張數、按下一步（真站是 javascript:__doPostBack 連結，要由頁面環境代點，不然被擴充功能的 CSP 擋掉）', { skip }, async () => {
@@ -249,10 +265,10 @@ test('按下一步後 ibon 處理得慢：等到 45 秒才算沒反應，中間�
   assert.ok(!r.calls.some((c) => c.type === 'retry'));
 });
 
-test('座位/數量頁：選了張數後 ibon 在背景更新並把張數重置 → 等安靜、重選，再按下一步（不撞在一起）', { skip }, async () => {
-  // 模擬 ibon：張數一變，0.6 秒後重畫表格（數量被重置成 0），重畫期間按下一步會卡住
+test('座位/數量頁：選了張數後 ibon 在背景更新並把張數重置 → 等更新回來、重選，再按下一步（不撞在一起）', { skip }, async () => {
+  // 模擬 ibon：張數一變就回伺服器更新（請求 0.6 秒才回），回來後重畫表格、數量被重置成 0；更新期間按下一步會卡住
   const html = qtyPage({ priceSelected: true }).replace('<select id="q" class="form-control form-control-sm">',
-    `<select id="q" class="form-control form-control-sm" onchange="window.__busy=true;setTimeout(()=>{const s=document.getElementById('q');if(!window.__reset){window.__reset=true;s.value='0';}document.body.appendChild(document.createElement('i'));window.__busy=false},600)">`)
+    `<select id="q" class="form-control form-control-sm" onchange="window.__busy=true;fetch('/__update?ms=600').then(()=>{const s=document.getElementById('q');if(!window.__reset){window.__reset=true;s.value='0';}document.body.appendChild(document.createElement('i'));window.__busy=false})">`)
     .replace("javascript:void(document.title='NEXT q='+document.getElementById('q').value)", "javascript:void(document.title=window.__busy?'COLLIDED':'NEXT q='+document.getElementById('q').value)");
   const r = await run({ url: U.qty, html, directive: RUN({ qty: 2 }), wait: 6500 });
   assert.equal(r.title, 'NEXT q=2', '重畫完才按、張數是重選過的');
@@ -261,8 +277,27 @@ test('座位/數量頁：選了張數後 ibon 在背景更新並把張數重置 
 
 test('座位/數量頁：張數一直被頁面重置、選不住 → 不按下一步，交給你', { skip }, async () => {
   const html = qtyPage({ priceSelected: true }).replace('<select id="q" class="form-control form-control-sm">',
-    `<select id="q" class="form-control form-control-sm" onchange="setTimeout(()=>{document.getElementById('q').value='0';document.body.appendChild(document.createElement('i'))},300)">`);
-  const r = await run({ url: U.qty, html, directive: RUN({ qty: 2 }), wait: 12000 });
+    `<select id="q" class="form-control form-control-sm" onchange="fetch('/__update?ms=300').then(()=>{document.getElementById('q').value='0';document.body.appendChild(document.createElement('i'))})">`);
+  const r = await run({ url: U.qty, html, directive: RUN({ qty: 2 }), wait: 6000 });
   assert.equal(result(r).kind, 'fill-failed');
   assert.equal(r.title.startsWith('NEXT'), false);
+});
+
+test('等待改看網路請求：選張數後沒有背景更新時，不到 0.8 秒就按下一步（0.9.4 以前至少等 0.8 秒）', { skip }, async () => {
+  const r = await run({ url: U.qty, html: qtyPage({ priceSelected: true }), directive: RUN({ qty: 2 }), wait: 2000 });
+  assert.equal(r.title, 'NEXT q=2');
+  const ms = (re) => { const c = r.calls.find((x) => x.type === 'log' && re.test(x.payload.msg)); return c ? Number(c.payload.msg.match(/載入後 (\d+) ms/)[1]) : NaN; };
+  const gap = ms(/按下「下一步」/) - ms(/已選張數/);
+  assert.ok(gap >= 250 && gap < 800, `選張數到按下一步隔 ${gap} ms`);
+});
+
+test('倒數：開賣前 3 秒先跟 orders.ibon.com.tw 建連線（preconnect）', { skip }, async () => {
+  const r = await run({ url: U.event, html: ACTIVITY, directive: { mode: 'countdown', targetTs: Date.now() + 3500, cfg: { ...CFG, syncClock: false } }, wait: 1500 });
+  const links = await r.page.evaluate(() => [...document.querySelectorAll('link[data-ith]')].map((l) => `${l.rel} ${l.href}`));
+  assert.deepEqual(links.sort(), ['dns-prefetch https://orders.ibon.com.tw/', 'preconnect https://orders.ibon.com.tw/']);
+});
+
+test('活動頁開賣後一載入就先建連線', { skip }, async () => {
+  const r = await run({ url: U.event, html: ACTIVITY, directive: RUN({ sessionWhen: '2026/12/06 18:00' }), wait: 1000 });
+  assert.equal(await r.page.evaluate(() => document.querySelectorAll('link[rel="preconnect"][data-ith]').length), 1);
 });

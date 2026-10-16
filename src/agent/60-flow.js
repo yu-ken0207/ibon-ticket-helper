@@ -21,15 +21,53 @@
     await call('result', { ok, kind, msg, url: location.href, handOff: !!extra.handOff }, 1500);
   }
 
+  /**
+   * 等到 cond() 回傳真值，回傳那個值；逾時、取消或頁面開始離開回 null。
+   * 頁面一有變動就馬上再看一次（MutationObserver，同一批變動只看一次）；封閉 Shadow DOM 裡的變動觀察不到
+   * （ibon 的場次表、票區表都在裡面），所以另外每 50 毫秒看一次。
+   * slow() 是比較重的檢查（找排隊、人類驗證的字樣要讀整頁文字），每 slowEvery 毫秒才看一次，回傳真值也會結束等待。
+   */
+  function waitFor(cond, maxMs, slow = null, slowEvery = 500) {
+    return new Promise((resolve) => {
+      const t0 = Date.now();
+      let done = false;
+      let timer = 0;
+      let queued = false;
+      let slowAt = 0;
+      const obs = new MutationObserver(() => {
+        if (queued || done) return;
+        queued = true;
+        setTimeout(() => { queued = false; check(); }, 0);
+      });
+      const stop = (v) => {
+        if (done) return;
+        done = true;
+        obs.disconnect();
+        clearTimeout(timer);
+        resolve(v);
+      };
+      function check() {
+        if (done) return;
+        if (state.aborted || state.leaving) { stop(null); return; }
+        const v = cond();
+        if (v) { stop(v); return; }
+        if (slow && Date.now() - slowAt >= slowEvery) {
+          slowAt = Date.now();
+          const w = slow();
+          if (w) { stop(w); return; }
+        }
+        if (Date.now() - t0 >= maxMs) stop(null);
+      }
+      obs.observe(document.documentElement || document, { childList: true, subtree: true, attributes: true, characterData: true });
+      const tick = () => { check(); if (!done) timer = setTimeout(tick, 50); };
+      tick();
+    });
+  }
+
   /** 等場次表出現（最多 maxMs），回傳列 */
   async function waitSessions(maxMs) {
-    const t0 = Date.now();
-    let rows = sessionRows();
-    while (!rows.length && Date.now() - t0 < maxMs && !state.aborted) {
-      await sleep(300);
-      rows = sessionRows();
-    }
-    return rows;
+    const rows = await waitFor(() => { const r = sessionRows(); return r.length ? r : null; }, maxMs);
+    return rows || [];
   }
 
   /** 重新整理再試一次：次數與間隔由背景程式決定 */
@@ -69,11 +107,13 @@
   }
 
   /**
-   * 等頁面安靜下來：選了張數、勾了同意之後，ibon 會在背景更新頁面（重算金額、重畫表格）。
-   * 更新到一半就按下一步，兩個請求撞在一起，ibon 會一直轉圈（2026-10-16 實測：選張數與按下一步只隔 4 毫秒就卡住）。
-   * 所以先等「連續 quietMs 毫秒沒有任何頁面變動」，最多等 maxMs；至少等 minMs，讓網頁的 change 事件有時間開始動作。
+   * 等 ibon 的背景更新做完：選了張數、勾了同意之後，ibon 可能在背景送請求更新頁面（重算金額、重畫表格）。
+   * 更新到一半就按下一步，兩個請求可能撞在一起（2026-10-16 選張數到按下一步只隔 4 毫秒時一直轉圈）。
+   * 做完的條件：頁面自己的網路請求都回來了（alert-hook.js 數的）、而且連續 quietMs 毫秒沒有畫面變動；
+   * 至少等 minMs，讓網頁的 change 事件有時間把請求送出去。最多等 maxMs。頁面開始離開就馬上結束。
+   * 0.9.4 以前是固定至少等 0.8 秒，這裡改成看請求，通常幾百毫秒就好。
    */
-  function settle(quietMs = 400, maxMs = 6000, minMs = 300) {
+  function settle(quietMs = 150, maxMs = 8000, minMs = 250) {
     return new Promise((resolve) => {
       const t0 = Date.now();
       let last = Date.now();
@@ -81,8 +121,9 @@
       obs.observe(document.documentElement, { childList: true, subtree: true, attributes: true, characterData: true });
       const tick = () => {
         const t = Date.now();
-        if ((t - t0 >= minMs && t - last >= quietMs) || t - t0 >= maxMs) { obs.disconnect(); resolve(t - t0); return; }
-        setTimeout(tick, 50);
+        const quiet = t - t0 >= minMs && t - last >= quietMs && !netBusy();
+        if (quiet || state.leaving || state.aborted || t - t0 >= maxMs) { obs.disconnect(); resolve(t - t0); return; }
+        setTimeout(tick, 25);
       };
       tick();
     });
@@ -94,6 +135,7 @@
     let shown = 0;
     while (Date.now() - t0 < maxMs && !state.aborted) {
       if (state.alerts.length > alertBefore) return { kind: 'alert', msg: state.alerts[state.alerts.length - 1] };
+      if (state.leaving) return { kind: 'leaving' };   // 換頁了：由新頁面接手
       const sec = Math.floor((Date.now() - t0) / 1000);
       if (sec >= 3 && sec !== shown) { shown = sec; setStatus(`ibon ${label}，已等 ${sec} 秒…先不要重新整理`, 'ok'); }
       await sleep(200);

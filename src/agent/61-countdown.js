@@ -45,6 +45,9 @@
       await call('fired', { at: Date.now(), drift: Math.round(now() - fireAt) }, 800);
       return runFlow({ cfg, since: Date.now() });
     }
+    // 開賣前 3 秒先跟 orders.ibon.com.tw 建好連線，開賣後跳到購票頁時省掉握手時間
+    if (!(await waitUntil(fireAt - 3000))) return;
+    preconnectOrders();
     // 開賣前 0.3 秒先跟背景程式報備「要重新整理了」，等它回覆；到點時就不用再等，重新整理可以立刻發出
     if (!(await waitUntil(fireAt - 300))) return;
     await call('fired', { at: Date.now(), drift: null }, 800);
