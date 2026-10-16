@@ -147,3 +147,8 @@ fieldset.prefs legend { font-weight: 700; padding: 0 4px; }
 .task .plan .v-chosen { color: var(--ok); font-weight: 600; }
 .task .plan .v-skip, .task .plan .v-unknown, .task .plan .v-wait { color: var(--muted); }
 .task details { font-size: 12px; }
+.task .guide { margin: 6px 0; padding: 6px 8px; border: 1px solid var(--brand); border-radius: 6px; font-size: 12px; }
+.task .guide .rec { font-weight: 700; margin: 4px 0; }
+.task .guide table { width: 100%; border-collapse: collapse; }
+.task .guide td { padding: 2px 4px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.task .guide .s-ok { color: var(--ok); } .task .guide .s-fail { color: var(--err); } .task .guide .s-unverified { color: var(--warn); } .task .guide .s-unavailable { color: var(--muted); }

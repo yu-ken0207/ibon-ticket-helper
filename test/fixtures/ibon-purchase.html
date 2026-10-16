@@ -13,6 +13,8 @@
 -->
 <p style="background:#fde68a;padding:6px">測試用頁面：結構是假設的，內容是虛構的，不是任何官方網站。</p>
 <div id="member">測試會員 您好｜member@example.com｜0912-345-678</div>
+<p>購票人：陳小華</p>
+<p>訂購帳號 測試使用者</p>
 <h2>選擇票區</h2>
 <div id="areaHost"></div>
 <form id="ticketForm" action="/application/UTK02/UTK0202_000.aspx?SESSION=abc123">
@@ -21,6 +23,8 @@
   <p>請輸入圖形驗證碼</p>
   <img alt="驗證碼" src="/captcha.png?t=999">
   <input id="captchaInput" name="captcha" value="ABCD">
+  <label><input type="radio" name="pay" value="atm" checked> ATM 轉帳</label>
+  <p id="hiddenNote" style="display:none">隱藏的說明</p>
   <button type="button" id="nextBtn">下一步</button>
 </form>
 <script>

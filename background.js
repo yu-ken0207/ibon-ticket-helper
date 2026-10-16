@@ -32,9 +32,10 @@ import { sanitizeBox, BLACKBOX_MAX } from './lib/box.js';
 import { siteOf, targetUrlOf, siteKey, siteLabel, pageKindOf, infoSiteOf, infoUrlOf, INFO_SITES } from './lib/sites.js';
 import { parseTicketLines, cleanProfile, checkProfile, describeProfileProblem } from './lib/flow.js';
 import { sanitizeInfo } from './lib/eventinfo.js';
-import { ibonPageKind, isIbonPage, IBON_PAGE_INFO, IBON_POLICY, validateEventInfo, matchIbonPrefs } from './lib/ibon.js';
+import { ibonPageKind, isIbonPage, IBON_PAGE_INFO, IBON_POLICY, validateEventInfo, matchIbonPrefs, leakCheck } from './lib/ibon.js';
 import { STATES, newWorkflow, transition, stateOfResult, composeHandoff } from './lib/workflow.js';
 import { policyDecision } from './lib/policy.js';
+import { guideActivity, guidePurchase, guideOther } from './lib/guide.js';
 
 const ALARM_OPEN = 'ith-open';
 const ALARM_WATCH = 'ith-watch';
@@ -440,16 +441,74 @@ async function currentIbonTab() {
 }
 
 /** 讀目前 ibon 分頁的狀態（op: state）或結構快照（op: snapshot）。只讀，頁面程式不點任何東西 */
-async function ibonPage(op) {
+async function ibonPage(op, own = []) {
   const tab = await currentIbonTab();
   if (!tab) return { ok: false, error: '沒有開著的 ibon 分頁（活動頁或購票頁）' };
   const kind = ibonPageKind(tab.url);
-  const r = await chrome.tabs.sendMessage(tab.id, { type: op === 'snapshot' ? 'page-snapshot' : 'page-state' }).catch(() => null);
+  // own：你在設定頁填的姓名、手機、Email，只用來在快照裡遮掉，不寫進紀錄
+  const r = await chrome.tabs.sendMessage(tab.id, op === 'snapshot' ? { type: 'page-snapshot', own: arr(own, 4).map((x) => str(x, 60)) } : { type: 'page-state' }).catch(() => null);
   if (!r) {
     return { ok: false, kind, error: `這個分頁（${(IBON_PAGE_INFO[kind] || {}).label || kind}）沒有助手的讀取程式：只支援活動頁和購票頁；剛更新過擴充功能的話，請重新整理那一頁` };
   }
+  if (op === 'snapshot' && r.ok) {
+    // 存檔前再掃一次：還找得到個資就不交出去（只回報種類，不回報內容）
+    const leaks = leakCheck(JSON.stringify({ url: r.snapshot.url, title: r.snapshot.title, tree: r.snapshot.tree }), arr(own, 4).map((x) => str(x, 60)));
+    if (leaks.length) {
+      addLog(`結構快照沒有存檔：遮罩後還找得到 ${leaks.join('、')}`, 'warn');
+      return { ok: false, kind, leaks, error: `快照裡還找得到 ${leaks.join('、')}，為了保護個資沒有存檔。請把這個情況告訴開發者（不用附檔案）` };
+    }
+  }
   if (op === 'snapshot' && r.ok) addLog(`記錄 ibon 結構快照：${(IBON_PAGE_INFO[kind] || {}).label || kind}，${r.snapshot.nodes} 個節點${r.snapshot.truncated ? '（超過上限，後面沒記）' : ''}`);
   return { ...r, kind };
+}
+
+/* ───────────────────────── ibon 人工操作模式 ─────────────────────────
+ * 助手只讀頁面、依「我的需求」給建議與判斷依據，你操作換頁之後再讀一次核對；網站上的點擊、送出、付款都由你自己做。
+ * 判斷寫在 lib/guide.js；讀頁面的是 ibon-info.js（IbonAdapter）。流程狀態照你所在的頁面記（task.wf），歷程標「照回報的結果」。 */
+
+async function startGuide(raw) {
+  const cfg = normalizeCfg(raw);
+  const url = infoUrlOf(cfg.eventUrl);
+  if (!url) return { ok: false, error: '人工操作模式要先在網址欄貼 ibon 活動頁網址' };
+  if (!cfg.tickets.some((t) => t.qty > 0)) return { ok: false, error: '請在「我的需求」填票種與張數（例如「全票 2」），給建議與比對限購用' };
+  let tab = (await chrome.tabs.query({})).find((t) => t.url && infoUrlOf(t.url) === url && !pendingInfo.has(t.id));
+  if (!tab) tab = await chrome.tabs.create({ url, active: true });
+  await retireOld();
+  await chrome.alarms.clearAll();
+  const task = { ...newTask({ ...cfg, site: 'ibon' }, 'guide', { tabId: tab.id, startedAt: Date.now() }), site: 'ibon', guide: null };
+  await serial(() => set({ task }));
+  await badge('人', '#0f766e');
+  addLog('人工操作模式：助手只讀頁面、給建議並核對；網站上的點擊、送出、付款都由你自己做');
+  const r = await chrome.tabs.sendMessage(tab.id, { type: 'guide-read' }).catch(() => null);   // 分頁已經開好：先讀一次
+  if (r && r.ok) await onGuideReport(tab.id, r);
+  return { ok: true, task: await getTask() };
+}
+
+/** 頁面讀到的狀態（購票頁）只留認得的欄位 */
+const cleanState = (x) => ({
+  kind: str(x.kind, 20), label: str(x.label, 40), verified: x.verified === true,
+  login: x.login ? { state: x.login.state === 'logged-out' ? 'logged-out' : 'unknown', msg: str(x.login.msg, 120) } : null,
+  hints: arr(x.hints, 10).map((h) => ({ state: str(h.state, 20), msg: str(h.msg, 80), evidence: str(h.evidence, 20) })),
+});
+
+const GUIDE_STATES = { activity: ['ACTIVITY_READ', 'REQUIREMENT_CHECK', 'SESSION_SELECTION'], 'purchase-entry': ['TICKET_AREA_SELECTION'], purchase: ['TICKET_AREA_SELECTION'] };
+
+/** 每次頁面載入（或剛開始）讀到的內容 → 建議、判斷依據、各欄位讀取結果、核對上一步 */
+function onGuideReport(tabId, p) {
+  return serial(async () => {
+    const t = await getTask();
+    if (!t || t.mode !== 'guide' || t.tabId !== tabId || t.phase !== 'running') return { ok: false };
+    const kind = str(p.kind, 20);
+    let g;
+    if (kind === 'activity' && p.info) g = guideActivity(sanitizeInfo(p.info), t.cfg);
+    else if ((kind === 'purchase-entry' || kind === 'purchase') && p.state) g = guidePurchase(cleanState(p.state), t.guide);
+    else g = guideOther(kind);
+    let wf = transition(t.wf, 'PAGE_DETECTION', { reason: `人工操作模式：${g.label}`, force: true }).wf;
+    for (const st of GUIDE_STATES[kind] || []) wf = transition(wf, st, { reason: '人工操作模式：這一步由你自己做', force: true }).wf;
+    const guide = { ...g, n: ((t.guide && t.guide.n) || 0) + 1, at: Date.now() };
+    await set({ task: { ...t, wf, guide } });
+    return { ok: true };
+  });
 }
 
 /* ───────────────────────── 流程報到、PolicyGate ───────────────────────── */
@@ -726,9 +785,9 @@ chrome.tabs.onUpdated.addListener((tabId, info) => {
 
 /* ───────────────────────── 訊息入口 ───────────────────────── */
 
-const POPUP_TYPES = new Set(['schedule', 'run-now', 'resume', 'pause', 'cancel', 'status', 'clear-logs', 'preview-url', 'check-slots', 'health-check', 'read-info', 'match-info', 'ibon-page']);
+const POPUP_TYPES = new Set(['schedule', 'run-now', 'resume', 'pause', 'cancel', 'status', 'clear-logs', 'preview-url', 'check-slots', 'health-check', 'read-info', 'match-info', 'ibon-page', 'ibon-guide']);
 // ibon 的頁面（活動頁、購票頁）只能送這兩種
-const INFO_PAGE_TYPES = new Set(['info-hello', 'info-result']);
+const INFO_PAGE_TYPES = new Set(['info-hello', 'info-result', 'guide-hello', 'guide-report']);
 const PAGE_TYPES = new Set(['hello', 'fired', 'fired-drift', 'retry', 'result', 'log', 'warn', 'abort-request', 'check-result', 'load-ok', 'clock', 'health-result', 'blackbox', 'skip-slot', 'rate-seen', 'wf', 'gate', 'skip-area']);
 
 async function handle(msg, sender) {
@@ -743,6 +802,8 @@ async function handle(msg, sender) {
     if (!INFO_PAGE_TYPES.has(type)) return { ok: false, error: 'not allowed' };
     const tabId = sender.tab.id;
     if (type === 'info-hello') return { read: pendingInfo.has(tabId) };
+    if (type === 'guide-hello') { const t = await getTask(); return { guide: !!(t && t.mode === 'guide' && t.tabId === tabId && t.phase === 'running') }; }
+    if (type === 'guide-report') return onGuideReport(tabId, msg.payload || {});
     return { ok: finishInfo(tabId, msg.payload || {}) };
   }
 
@@ -880,7 +941,8 @@ async function handle(msg, sender) {
       if (!eventInfo) return { ok: false, error: '還沒有讀過活動資訊' };
       return withChecks({ ok: true, info: eventInfo }, msg.prefs);
     }
-    case 'ibon-page': return ibonPage(msg.op);
+    case 'ibon-page': return ibonPage(msg.op, msg.own);
+    case 'ibon-guide': return startGuide(msg.cfg);
     case 'cancel': return cancel();
     case 'clear-logs': await serial(() => set({ logs: [], blackbox: [] })); return { ok: true };
     case 'preview-url': {

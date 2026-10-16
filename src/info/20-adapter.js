@@ -15,17 +15,24 @@
 
   /**
    * 結構快照（你按了才記）：標籤、id、class、角色、欄位名稱、按鈕與標籤上的字、下拉選單的選項，連同封閉的 Shadow DOM。
-   * 不記錄欄位裡填的內容；文字經過 maskText（遮 Email、手機、身分證、長數字），網址只留路徑與參數名稱。
-   * 姓名這類沒有固定格式的字遮不到，交出去之前請自己看過。
+   * 也記看不看得見（hidden）、選項有沒有被選（checked、selected）、data-* 屬性：之後要核對「你選了哪一個」。
+   * 不記錄欄位裡填的內容；文字經過 maskText（遮 Email、手機、身分證、長數字、「XXX 您好」「姓名：XXX」，以及 own＝你在設定頁填的姓名、手機、Email），
+   * 網址只留路徑與參數名稱。沒有固定說法的姓名還是可能遮不到，交出去之前請自己看過。
    */
-  const SNAP = { nodes: 3000, depth: 40, text: 60 };
-  function snapshotStructure() {
+  const SNAP = { nodes: 5000, depth: 45, text: 80 };
+  function snapshotStructure(own = []) {
     let count = 0;
+    const m = (v, n) => maskText(v, own).slice(0, n);
     const attr = (el, out) => {
-      for (const a of ['name', 'type', 'role', 'aria-label', 'for', 'title', 'placeholder']) {
-        if (el.hasAttribute(a)) out[a] = maskText(el.getAttribute(a)).slice(0, 40);
+      for (const a of ['name', 'type', 'role', 'aria-label', 'for', 'title', 'placeholder', 'value']) {
+        if (a === 'value' && !['radio', 'checkbox', 'submit', 'button'].includes(el.type)) continue;   // 文字欄位的值不記
+        if (el.hasAttribute(a)) out[a] = m(el.getAttribute(a), 40);
       }
+      const data = [...el.attributes].filter((x) => x.name.startsWith('data-') && !x.name.startsWith('data-ng')).slice(0, 6);
+      if (data.length) out.data = Object.fromEntries(data.map((x) => [x.name, m(x.value, 30)]));
       if (el.disabled || el.getAttribute('aria-disabled') === 'true') out.disabled = true;
+      if (el.checked) out.checked = true;
+      if (!isVisible(el)) out.hidden = true;
     };
     const walk = (el, depth) => {
       if (count >= SNAP.nodes || depth > SNAP.depth) return null;
@@ -39,12 +46,13 @@
       if (tag === 'a' && el.getAttribute('href')) out.href = maskUrl(el.getAttribute('href'), location.href);
       if (tag === 'form' && el.getAttribute('action')) out.action = maskUrl(el.getAttribute('action'), location.href);
       if (tag === 'img') { out.alt = maskText(el.alt).slice(0, 40); if (el.getAttribute('src')) out.src = maskUrl(el.getAttribute('src'), location.href); }
-      if (tag === 'input' || tag === 'textarea') { if (el.value) out.filled = true; return out; }   // 只記「有沒有填」，不記內容
-      if (tag === 'select') { out.options = [...el.options].slice(0, 30).map((o) => maskText(norm(o.text)).slice(0, 40)); return out; }
+      if (tag === 'input' || tag === 'textarea') { if (el.value && !['radio', 'checkbox', 'submit', 'button'].includes(el.type)) out.filled = true; return out; }   // 只記「有沒有填」，不記內容
+      if (tag === 'select') { out.options = [...el.options].slice(0, 30).map((o) => m(norm(o.text), 40)); out.selected = el.selectedIndex; return out; }
       if (tag === 'iframe') { out.src = maskUrl(el.getAttribute('src') || '', location.href); return out; }
+      if (tag === 'canvas') { out.size = `${el.width}x${el.height}`; return out; }
       if (['script', 'style', 'noscript', 'svg', 'template', 'canvas', 'video'].includes(tag)) return out;
-      const own = norm([...el.childNodes].filter((n) => n.nodeType === Node.TEXT_NODE).map((n) => n.nodeValue).join(' '));
-      if (own) out.x = maskText(own).slice(0, SNAP.text);
+      const txt = norm([...el.childNodes].filter((n) => n.nodeType === Node.TEXT_NODE).map((n) => n.nodeValue).join(' '));
+      if (txt) out.x = m(txt, SNAP.text);
       const kids = [];
       const sr = shadowOf(el);
       if (sr) kids.push({ t: '#shadow-root', mode: el.shadowRoot ? 'open' : 'closed', k: [...sr.children].map((c) => walk(c, depth + 1)).filter(Boolean) });
@@ -54,7 +62,7 @@
     };
     const tree = document.body ? walk(document.body, 0) : null;
     return {
-      kind: ibonPageKind(location.href), url: maskUrl(location.href), title: maskText(document.title).slice(0, 100),
+      kind: ibonPageKind(location.href), url: maskUrl(location.href), title: m(document.title, 100),
       takenAt: Date.now(), nodes: count, truncated: count >= SNAP.nodes, tree,
     };
   }
@@ -91,6 +99,6 @@
     supportedActions: () => IBON_POLICY,
 
     /** 結構快照：給開發真實購票頁的唯讀解析用 */
-    snapshot: snapshotStructure,
+    snapshot: (own) => snapshotStructure(own),
   };
 

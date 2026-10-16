@@ -263,6 +263,14 @@ function renderPage(r) {
   v.append(el('div', { class: 'raw' }, '這一頁的點選、張數、下一步、驗證碼、付款都由你自己操作。'));
 }
 
+$('btnGuide').addEventListener('click', async () => {
+  const out = $('guideMsg');
+  const r = await send({ type: 'ibon-guide', cfg: readForm() });
+  out.textContent = r.ok ? '已開始人工操作模式：建議與核對顯示在下面的「目前任務」' : (r.error || '沒辦法開始');
+  out.className = 'hint ' + (r.ok ? 'good' : 'bad');
+  refresh();
+});
+
 $('btnPage').addEventListener('click', async () => {
   const out = $('pageMsg');
   out.textContent = '讀取中…（只讀，不會點任何按鈕）';
@@ -278,7 +286,9 @@ $('btnSnapshot').addEventListener('click', async () => {
   const out = $('pageMsg');
   out.textContent = '記錄中…（只讀）';
   out.className = 'hint';
-  const r = await send({ type: 'ibon-page', op: 'snapshot' });
+  // 你填的姓名、手機、Email 只拿來在快照裡遮掉
+  const own = [$('profileName').value.trim(), $('profilePhone').value.trim(), $('profilePhone').value.replace(/[\s-]/g, ''), $('profileEmail').value.trim()].filter((x) => x.length >= 2);
+  const r = await send({ type: 'ibon-page', op: 'snapshot', own });
   if (!r.ok) { out.textContent = r.error || '記錄失敗'; out.className = 'hint bad'; return; }
   const snap = r.snapshot;
   let shadows = 0;
@@ -312,10 +322,11 @@ function renderTask(task, now, labels = {}) {
 
   const phaseCls = task.phase === 'done' ? (task.result && task.result.ok ? 'ok' : 'err')
     : task.phase === 'waiting-user' ? 'warn' : task.phase === 'cancelled' ? 'err' : '';
-  box.append(el('div', { class: 'phase ' + phaseCls }, PHASE[task.phase] || task.phase));
+  box.append(el('div', { class: 'phase ' + phaseCls }, task.mode === 'guide' && task.phase === 'running' ? '人工操作模式（網站上的操作由你自己做）' : (PHASE[task.phase] || task.phase)));
   const wf = task.wf || null;
   if (wf) box.append(el('div', { class: 'wfstate' }, `流程：${labels[wf.state] || wf.state}`));
   if (task.handoff) box.append(renderHandoff(task.handoff));
+  if (task.guide) box.append(renderGuide(task.guide));
 
   const dl = el('dl');
   const row = (k, v) => { dl.append(el('dt', {}, k), el('dd', {}, v)); };
@@ -344,6 +355,33 @@ function renderTask(task, now, labels = {}) {
     d.append(ol);
     box.append(d);
   }
+}
+
+/** 人工操作模式：這一頁的核對結果、建議與依據、各欄位讀取結果 */
+const FIELD_MARK = { ok: '✓ 讀取成功', unverified: '？ 尚未驗證', fail: '✗ 讀取失敗', unavailable: '— 這一頁沒有' };
+function renderGuide(g) {
+  const box = el('div', { class: 'guide' });
+  box.append(el('div', { class: 'title' }, `人工操作模式：第 ${g.n} 頁，${g.label}`));
+  if (g.verify) box.append(el('div', { class: g.verify.status === 'ok' ? 'ok' : 'warn' }, `核對：${g.verify.msg}`));
+  box.append(el('div', { class: 'rec' }, `建議：${g.recommendation}`));
+  const b = g.basis || {};
+  if (b.plan) {
+    box.append(el('div', {}, `依據：${b.plan.msg}`));
+    const ul = el('ul');
+    for (const r of (b.plan.ranked || []).slice(0, 6)) ul.append(el('li', {}, `${r.verdict === 'chosen' ? '✓' : '✗'} ${r.text}：${r.reason}`));
+    box.append(ul);
+  }
+  if (b.match) for (const m of [...(b.match.areas || []), b.match.qty, ...(b.match.msgs || [])].filter(Boolean)) box.append(el('div', { class: 'raw' }, m));
+  for (const h of b.hints || []) box.append(el('div', { class: 'warn' }, h));
+  if (b.policy) box.append(el('div', { class: 'raw' }, b.policy));
+  const table = el('table');
+  for (const f of g.fields || []) {
+    const tr = el('tr');
+    tr.append(el('td', {}, f.field), el('td', { class: `s-${f.status}` }, FIELD_MARK[f.status] || f.status), el('td', {}, [f.value, f.note].filter(Boolean).join('｜')));
+    table.append(tr);
+  }
+  box.append(table);
+  return box;
 }
 
 /** 交接內容（HandoffManager）：為什麼停、停在哪、已確認的內容、你要做的下一步 */
@@ -391,7 +429,7 @@ async function refresh() {
   // 停下來交給你（不是確認頁）時才顯示「繼續」：確認頁一定由你自己按確認
   const t = r.task;
   $('btnResume').hidden = !(t && ((t.phase === 'waiting-user' && !(t.result && t.result.kind === 'ready')) || t.phase === 'paused'));
-  $('btnPause').hidden = !(t && ['fired', 'running'].includes(t.phase));
+  $('btnPause').hidden = !(t && ['fired', 'running'].includes(t.phase) && t.mode !== 'guide');
   renderTask(r.task, r.now || Date.now(), r.labels || {});
   renderLogs(r.logs || []);
 }

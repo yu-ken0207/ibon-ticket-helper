@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ibonPageKind, isIbonPage, IBON_POLICY, validateEventInfo, memberLimit, parseIbonPrefs, matchIbonPrefs, maskText, maskUrl, stateHints, localTime } from '../../lib/ibon.js';
+import { ibonPageKind, isIbonPage, IBON_POLICY, validateEventInfo, memberLimit, parseIbonPrefs, matchIbonPrefs, maskText, maskUrl, stateHints, localTime, leakCheck } from '../../lib/ibon.js';
 
 test('ibon 頁面分類：活動頁、線上購票轉址、購票入口（網址已驗證）、購票其他頁；不是 ibon 回 null', () => {
   assert.equal(ibonPageKind('https://ticket.ibon.com.tw/ActivityInfo/Details/39972'), 'activity');
@@ -70,6 +70,19 @@ test('結構快照的遮罩：Email、手機、身分證、長數字遮掉；日
   assert.equal(maskText('2026/11/14(六) 15:30｜2026-10-04｜NT$8,000｜剩 12 張'), '2026/11/14(六) 15:30｜2026-10-04｜NT$8,000｜剩 12 張');
   assert.equal(maskUrl('/application/UTK02/UTK0201_000.aspx?PERFORMANCE_ID=123&PRODUCT_ID=456', 'https://orders.ibon.com.tw/x'),
     'https://orders.ibon.com.tw/application/UTK02/UTK0201_000.aspx?PERFORMANCE_ID=…&PRODUCT_ID=…');
+});
+
+test('快照遮罩：有固定說法的姓名、你自己的資料都遮掉', () => {
+  assert.equal(maskText('王小明 您好｜登出'), '[姓名] 您好｜登出');
+  assert.equal(maskText('購票人：陳小華／取票人: 林大同'), '購票人：[姓名]／取票人: [姓名]');
+  assert.equal(maskText('訂購人 吳美麗 0987654321', ['吳美麗', '0987654321']), '訂購人 [你的資料] [你的資料]');
+  assert.equal(maskText('選擇票區', ['吳']), '選擇票區');   // 太短的字不拿來比對
+});
+
+test('存檔前的掃描：還看得到個資就回報種類，日期、金額不算', () => {
+  assert.deepEqual(leakCheck('2026/11/14 15:30 NT$8,000 剩 12 張'), []);
+  assert.deepEqual(leakCheck('a@b.co 0912345678 A123456789 4111111111111111'), ['Email', '手機', '身分證字號', '長數字']);
+  assert.deepEqual(leakCheck('購票人 吳美麗', ['吳美麗']), ['你的資料']);
 });
 
 test('購票頁的狀態提示：照頁面上的字給提示，一律標「未驗證」', () => {

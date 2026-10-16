@@ -961,6 +961,7 @@ const SCENARIOS = [
       await sleep(800);
       await popup.bringToFront();
       await popup.fill('#eventUrl', IBON_URL);
+      await popup.fill('#profileName', '測試使用者');   // 你自己的資料：快照裡要遮掉
       await sleep(600);
       await popup.click('#btnPage');
       await popup.waitForFunction(() => !/讀取中/.test(document.getElementById('pageMsg').textContent), null, { timeout: 15000 });
@@ -973,7 +974,8 @@ const SCENARIOS = [
       const snapMsg = await popup.textContent('#pageMsg');
       const findShadow = (n) => !!n && ((n.t === '#shadow-root' && n.mode === 'closed') || (n.k || []).some(findShadow));
       const inputs = [];
-      (function walk(n) { if (!n) return; if (n.t === 'input') inputs.push(n); for (const k of n.k || []) walk(k); })(snap.tree);
+      const nodes = [];
+      (function walk(n) { if (!n) return; nodes.push(n); if (n.t === 'input') inputs.push(n); for (const k of n.k || []) walk(k); })(snap.tree);
       const clicked = ibonRequests.filter((r) => /__clicked/.test(r));
       const nonGet = ibonRequests.filter((r) => !r.startsWith('GET '));
       const s = await status(popup);
@@ -985,9 +987,58 @@ const SCENARIOS = [
         ['快照：讀得到封閉 Shadow DOM 裡的票區', findShadow(snap.tree) && raw.includes('示範看台區') && raw.includes('NT$150'), `${snap.nodes} 個節點`],
         ['快照：Email、手機遮掉；參數值、表單送出網址的參數值不留', !raw.includes('member@example.com') && !raw.includes('0912-345-678') && raw.includes('[email]') && raw.includes('[手機]') && !raw.includes('TEST1') && !raw.includes('abc123'), ''],
         ['快照：欄位只記有沒有填，不記內容', !raw.includes('ABCD') && inputs.some((i) => i.filled === true), JSON.stringify(inputs)],
+        ['快照：「XXX 您好」「購票人：XXX」與你自己的姓名都遮掉', !/測試會員|陳小華|測試使用者/.test(raw) && raw.includes('[姓名] 您好') && raw.includes('購票人：[姓名]') && raw.includes('[你的資料]'), ''],
+        ['快照：記下選項有沒有被選、元素看不看得見', inputs.some((i) => i.type === 'radio' && i.checked === true && i.value === 'atm') && nodes.some((n) => n.id === 'hiddenNote' && n.hidden === true), ''],
         ['設定頁說明已存檔與注意事項', /已存成檔案：\d+ 個節點、1 個 Shadow DOM/.test(snapMsg) && /姓名這類遮不到/.test(snapMsg), snapMsg],
         ['沒有點任何按鈕、沒有送出任何東西', clicked.length === 0 && nonGet.length === 0, `點擊 ${clicked.length}、非 GET 請求 ${nonGet.length}`],
         ['沒有建立任務', s.task.phase === 'none', `任務 ${s.task.phase}`],
+      ];
+    },
+  },
+  {
+    name: 'ibon-guide',
+    once: true,
+    title: 'ibon 人工操作模式（虛構樣本頁）：活動頁給建議與依據；你換到購票頁後核對，購票頁欄位照實標「尚未驗證」；不點任何東西',
+    async run({ ctx, popup }) {
+      ibonRequests.length = 0;
+      await popup.fill('#eventUrl', IBON_URL);
+      await popup.fill('#keywords', '12/05 20:00\n12/05 18:00');
+      await popup.fill('#tickets', '全票 2');
+      await popup.fill('#areas', '看台');
+      await popup.fill('#maxUnitPrice', '250');
+      const page = await ctx.newPage();   // 你自己開著的活動頁
+      await page.goto(IBON_URL);
+      await sleep(1500);
+      await popup.bringToFront();
+      await sleep(400);
+      await popup.click('#btnGuide');
+      await sleep(300);
+      const r = await popup.textContent('#guideMsg');
+      const s1 = await waitTask(popup, (t) => !!(t.guide && t.guide.pageKind === 'activity'), 20000);
+      const g1 = s1.task.guide || {};
+      const f1 = Object.fromEntries((g1.fields || []).map((f) => [f.field, f]));
+      // 你自己按了「線上購票」：這裡用換頁模擬（真站的操作一律由你做）
+      await page.goto(IBON_PURCHASE_URL);
+      const s2 = await waitTask(popup, (t) => !!(t.guide && t.guide.n >= 2), 20000);
+      const g2 = s2.task.guide || {};
+      const f2 = Object.fromEntries((g2.fields || []).map((f) => [f.field, f]));
+      await sleep(400);
+      const card = await popup.textContent('#taskBox');
+      const clicked = ibonRequests.filter((x) => /__clicked/.test(x));
+      const nonGet = ibonRequests.filter((x) => !x.startsWith('GET '));
+      await clickAndRead(popup, '#btnCancel');
+      const s3 = await waitTask(popup, (t) => t.phase === 'cancelled', 5000);
+      return [
+        ['開始人工操作模式', /已開始人工操作模式/.test(r) && s1.task.mode === 'guide', r],
+        ['活動頁建議：先登入，再自己按第一梯的「線上購票」（第二梯已額滿）', /先登入/.test(g1.recommendation) && /自己按「2026\/12\/05\(六\) 18:00 夜間入場（第一梯）」那一列的「線上購票」/.test(g1.recommendation) && g1.basis.plan.ranked.some((x) => /第二梯/.test(x.text) && x.reason === '已額滿'), g1.recommendation],
+        ['依據附需求比對與「由你自己做」的政策', g1.basis.match.areas.some((m) => /2樓看台 NT\$150/.test(m)) && /由你自己做（CONFIRMATION_REQUIRED/.test(g1.basis.policy), g1.basis.policy],
+        ['活動頁欄位：場次讀取成功、「尚未開賣」尚未驗證、剩餘數量這一頁沒有', f1['場次'] && f1['場次'].status === 'ok' && f1['場次狀態'].status === 'unverified' && f1['剩餘數量'].status === 'unavailable' && f1['張數限制'].status === 'ok', JSON.stringify(f1['場次狀態'])],
+        ['換到購票頁後核對：照實說核對不了是哪個場次', g2.pageKind === 'purchase-entry' && g2.verify && g2.verify.status === 'unverified' && /無法確認是不是「2026\/12\/05\(六\) 18:00 夜間入場（第一梯）」/.test(g2.verify.msg), g2.verify && g2.verify.msg],
+        ['購票頁欄位一律尚未驗證、不猜；驗證碼只辨識有沒有', ['票區', '價格', '剩餘數量', '張數限制'].every((k) => f2[k] && f2[k].status === 'unverified' && f2[k].value === null) && /^頁面上有「/.test(f2['驗證碼區域'].value) && f2['驗證碼區域'].status === 'unverified', JSON.stringify(f2['驗證碼區域'])],
+        ['流程狀態照頁面記（由你操作）', inOrder(wfPath(s2.task), ['ACTIVITY_READ', 'REQUIREMENT_CHECK', 'SESSION_SELECTION', 'PAGE_DETECTION', 'TICKET_AREA_SELECTION']), wfPath(s2.task).join('→')],
+        ['設定頁顯示建議與欄位讀取結果', /人工操作模式：第 2 頁/.test(card) && /？ 尚未驗證/.test(card) && /建議：/.test(card), card.slice(0, 80)],
+        ['沒有點任何按鈕、沒有送出任何東西', clicked.length === 0 && nonGet.length === 0, `點擊 ${clicked.length}、非 GET ${nonGet.length}`],
+        ['用「取消任務」結束', s3.task.phase === 'cancelled', s3.task.phase],
       ];
     },
   },

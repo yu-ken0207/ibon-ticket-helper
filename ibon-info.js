@@ -401,8 +401,14 @@
    * 結構快照用：把可能是個資的文字遮掉（Email、手機、身分證字號、6 碼以上的連續數字如卡號、序號）。
    * 日期（2026-10-04、2026/10/04）、時間、有千分位的金額保留。姓名這類沒有固定格式的，遮不到，要請你自己看過再交出去。
    */
-  function maskText(s) {
-    return String(s == null ? '' : s)
+  function maskText(s, own = []) {
+    let t = String(s == null ? '' : s);
+    // 你自己在設定頁填的姓名、手機、Email：出現在哪裡都遮（只拿來比對，不會記下來）
+    for (const w of own) if (w && String(w).length >= 2) t = t.split(String(w)).join('[你的資料]');
+    return t
+      // 「王小明 您好」「姓名：王小明」這類有固定說法的姓名
+      .replace(/([^\s，,｜|:：／/()（）\[\]]{1,12})\s*(您好|你好|先生您好|小姐您好)/g, '[姓名] $2')
+      .replace(/(姓名|會員|購票人|收件人|持票人|取票人|聯絡人)(\s*[:：]\s*)([^\s，,｜|／/()（）]{1,20})/g, '$1$2[姓名]')
       .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '[email]')
       .replace(/\b[A-Za-z][12]\d{8}\b/g, '[身分證]')
       .replace(/(?:\+?886[-\s]?|\b0)9\d{2}[-\s]?\d{3}[-\s]?\d{3}\b/g, '[手機]')
@@ -410,6 +416,21 @@
   }
 
   /** 網址只留來源與路徑，查詢參數只留名稱（值可能是訂單、會員之類的編號） */
+  /**
+   * 快照存檔前再掃一次：還看得到 Email、手機、身分證、6 碼以上的數字、你的資料，就回傳找到的種類（不回傳內容本身）。
+   * 有找到就不存檔。
+   */
+  function leakCheck(text, own = []) {
+    const t = String(text || '');
+    const found = [];
+    if (/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/.test(t)) found.push('Email');
+    if (/(?:\+?886[-\s]?|\b0)9\d{2}[-\s]?\d{3}[-\s]?\d{3}\b/.test(t)) found.push('手機');
+    if (/\b[A-Za-z][12]\d{8}\b/.test(t)) found.push('身分證字號');
+    if ((t.match(/\d[\d\s-]{4,}\d/g) || []).some((m) => !/^\d{4}[-/]\d{1,2}[-/]\d{1,2}$/.test(m))) found.push('長數字');
+    if (own.some((w) => w && String(w).length >= 2 && t.includes(String(w)))) found.push('你的資料');
+    return found;
+  }
+
   function maskUrl(href, base) {
     try {
       const u = new URL(href, base);
@@ -618,17 +639,24 @@
 
   /**
    * 結構快照（你按了才記）：標籤、id、class、角色、欄位名稱、按鈕與標籤上的字、下拉選單的選項，連同封閉的 Shadow DOM。
-   * 不記錄欄位裡填的內容；文字經過 maskText（遮 Email、手機、身分證、長數字），網址只留路徑與參數名稱。
-   * 姓名這類沒有固定格式的字遮不到，交出去之前請自己看過。
+   * 也記看不看得見（hidden）、選項有沒有被選（checked、selected）、data-* 屬性：之後要核對「你選了哪一個」。
+   * 不記錄欄位裡填的內容；文字經過 maskText（遮 Email、手機、身分證、長數字、「XXX 您好」「姓名：XXX」，以及 own＝你在設定頁填的姓名、手機、Email），
+   * 網址只留路徑與參數名稱。沒有固定說法的姓名還是可能遮不到，交出去之前請自己看過。
    */
-  const SNAP = { nodes: 3000, depth: 40, text: 60 };
-  function snapshotStructure() {
+  const SNAP = { nodes: 5000, depth: 45, text: 80 };
+  function snapshotStructure(own = []) {
     let count = 0;
+    const m = (v, n) => maskText(v, own).slice(0, n);
     const attr = (el, out) => {
-      for (const a of ['name', 'type', 'role', 'aria-label', 'for', 'title', 'placeholder']) {
-        if (el.hasAttribute(a)) out[a] = maskText(el.getAttribute(a)).slice(0, 40);
+      for (const a of ['name', 'type', 'role', 'aria-label', 'for', 'title', 'placeholder', 'value']) {
+        if (a === 'value' && !['radio', 'checkbox', 'submit', 'button'].includes(el.type)) continue;   // 文字欄位的值不記
+        if (el.hasAttribute(a)) out[a] = m(el.getAttribute(a), 40);
       }
+      const data = [...el.attributes].filter((x) => x.name.startsWith('data-') && !x.name.startsWith('data-ng')).slice(0, 6);
+      if (data.length) out.data = Object.fromEntries(data.map((x) => [x.name, m(x.value, 30)]));
       if (el.disabled || el.getAttribute('aria-disabled') === 'true') out.disabled = true;
+      if (el.checked) out.checked = true;
+      if (!isVisible(el)) out.hidden = true;
     };
     const walk = (el, depth) => {
       if (count >= SNAP.nodes || depth > SNAP.depth) return null;
@@ -642,12 +670,13 @@
       if (tag === 'a' && el.getAttribute('href')) out.href = maskUrl(el.getAttribute('href'), location.href);
       if (tag === 'form' && el.getAttribute('action')) out.action = maskUrl(el.getAttribute('action'), location.href);
       if (tag === 'img') { out.alt = maskText(el.alt).slice(0, 40); if (el.getAttribute('src')) out.src = maskUrl(el.getAttribute('src'), location.href); }
-      if (tag === 'input' || tag === 'textarea') { if (el.value) out.filled = true; return out; }   // 只記「有沒有填」，不記內容
-      if (tag === 'select') { out.options = [...el.options].slice(0, 30).map((o) => maskText(norm(o.text)).slice(0, 40)); return out; }
+      if (tag === 'input' || tag === 'textarea') { if (el.value && !['radio', 'checkbox', 'submit', 'button'].includes(el.type)) out.filled = true; return out; }   // 只記「有沒有填」，不記內容
+      if (tag === 'select') { out.options = [...el.options].slice(0, 30).map((o) => m(norm(o.text), 40)); out.selected = el.selectedIndex; return out; }
       if (tag === 'iframe') { out.src = maskUrl(el.getAttribute('src') || '', location.href); return out; }
+      if (tag === 'canvas') { out.size = `${el.width}x${el.height}`; return out; }
       if (['script', 'style', 'noscript', 'svg', 'template', 'canvas', 'video'].includes(tag)) return out;
-      const own = norm([...el.childNodes].filter((n) => n.nodeType === Node.TEXT_NODE).map((n) => n.nodeValue).join(' '));
-      if (own) out.x = maskText(own).slice(0, SNAP.text);
+      const txt = norm([...el.childNodes].filter((n) => n.nodeType === Node.TEXT_NODE).map((n) => n.nodeValue).join(' '));
+      if (txt) out.x = m(txt, SNAP.text);
       const kids = [];
       const sr = shadowOf(el);
       if (sr) kids.push({ t: '#shadow-root', mode: el.shadowRoot ? 'open' : 'closed', k: [...sr.children].map((c) => walk(c, depth + 1)).filter(Boolean) });
@@ -657,7 +686,7 @@
     };
     const tree = document.body ? walk(document.body, 0) : null;
     return {
-      kind: ibonPageKind(location.href), url: maskUrl(location.href), title: maskText(document.title).slice(0, 100),
+      kind: ibonPageKind(location.href), url: maskUrl(location.href), title: m(document.title, 100),
       takenAt: Date.now(), nodes: count, truncated: count >= SNAP.nodes, tree,
     };
   }
@@ -694,7 +723,7 @@
     supportedActions: () => IBON_POLICY,
 
     /** 結構快照：給開發真實購票頁的唯讀解析用 */
-    snapshot: snapshotStructure,
+    snapshot: (own) => snapshotStructure(own),
   };
 
   /* ───────────────────────── 啟動 ─────────────────────────
@@ -708,6 +737,16 @@
     return { ok: true, info: { ...buildEventInfo(raw, Date.now()), warnings: raw.warnings, login } };
   }
 
+  /** 人工操作模式：活動頁讀活動資訊，其他頁讀頁面狀態（都只讀） */
+  async function guideRead() {
+    const kind = IbonAdapter.pageKind();
+    if (kind === 'activity') {
+      const r = await readAndBuild();
+      return r.ok ? { ok: true, kind, info: r.info } : { ok: false, kind, error: r.error };
+    }
+    return { ok: true, kind, state: IbonAdapter.readState() };
+  }
+
   /* 背景程式要的東西（只接受擴充功能自己送來的）：
    *   info-read      讀活動頁的資訊
    *   page-state     這一頁的種類、登入、狀態提示、操作政策
@@ -715,19 +754,29 @@
   const HANDLERS = {
     'info-read': readAndBuild,
     'page-state': async () => ({ ok: true, state: IbonAdapter.readState() }),
-    'page-snapshot': async () => ({ ok: true, snapshot: IbonAdapter.snapshot() }),
+    'guide-read': guideRead,
+    'page-snapshot': async (msg) => ({ ok: true, snapshot: IbonAdapter.snapshot(Array.isArray(msg.own) ? msg.own : []) }),
   };
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     const fn = msg && HANDLERS[msg.type];
     if (!fn || sender.id !== chrome.runtime.id) return false;
-    fn().then(sendResponse, (e) => sendResponse({ ok: false, error: String((e && e.message) || e) }));
+    fn(msg).then(sendResponse, (e) => sendResponse({ ok: false, error: String((e && e.message) || e) }));
     return true;
   });
 
   (async () => {
     let r = null;
     try { r = await chrome.runtime.sendMessage({ type: 'info-hello', payload: { url: location.href } }); } catch (_) { return; }
-    if (!r || !r.read) return;   // 不是要讀的分頁：什麼都不做
+    if (!r || !r.read) {
+      // 人工操作模式綁著這個分頁：每次換頁都讀一次交給背景程式核對
+      let g = null;
+      try { g = await chrome.runtime.sendMessage({ type: 'guide-hello', payload: { url: location.href } }); } catch (_) { return; }
+      if (g && g.guide) {
+        const out = await guideRead().catch((e) => ({ ok: false, error: String(e) }));
+        try { await chrome.runtime.sendMessage({ type: 'guide-report', payload: out }); } catch (_) { /* 背景程式不在了 */ }
+      }
+      return;   // 不是要讀資訊的分頁：其他什麼都不做
+    }
     let out;
     try { out = await readAndBuild(); } catch (e) { out = { ok: false, error: String((e && e.message) || e) }; }
     try { await chrome.runtime.sendMessage({ type: 'info-result', payload: out }); } catch (_) { /* 背景程式不在了 */ }
