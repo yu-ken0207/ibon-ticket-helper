@@ -1,25 +1,19 @@
 #!/usr/bin/env node
-// 產生兩支頁面程式（content script 不能用 ES module，所以共用模組在這裡拿掉 import / export 後內嵌）：
-//   agent.js      src/agent/ 底下的檔案依檔名順序串成一個 IIFE，00-core.js 之後內嵌 lib/ 的 format、clock、flow、planner。
-//                 只載入到本機模擬站（選購流程）。
-//   ibon-info.js  src/info/ 加上共用的 src/agent/05-dom.js（只有找元素、讀文字的工具），內嵌 lib/eventinfo.js、lib/ibon.js、lib/reminders.js。
-//                 只載入到 ibon 的活動頁與購票頁，只讀資訊（IbonAdapter），裡面沒有選購流程的程式。
+// 產生 page-agent.js：src/agent/ 底下的檔案依檔名順序串成一個 IIFE，00-core.js 之後插入頁面要用的共用模組 lib/*.js。
+// 頁面腳本（content script）不能用 ES module，所以共用模組在這裡拿掉 import / export 後內嵌。
 //
-// 用法：node tools/build.mjs           重新產生兩支
-//       node tools/build.mjs --check   只檢查是不是最新的，不是就以代碼 1 結束
+// 用法：node tools/build.mjs           重新產生 page-agent.js
+//       node tools/build.mjs --check   只檢查 page-agent.js 是不是最新的，不是就以代碼 1 結束
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const AGENT_DIR = path.join(ROOT, 'src', 'agent');
-const OUT = path.join(ROOT, 'agent.js');
-const LIBS = ['format.js', 'clock.js', 'flow.js', 'planner.js'];
+const OUT = path.join(ROOT, 'page-agent.js');
+// 頁面用得到的共用模組，順序要照相依：health 用到 format 的 fmt
+const LIBS = ['format.js', 'urls.js', 'areas.js', 'clock.js', 'health.js', 'eventinfo.js'];
 const BANNER = '// 這個檔案由 tools/build.mjs 從 src/agent/ 和 lib/ 產生，請改那兩個地方，不要直接改這裡。\n';
-const INFO_OUT = path.join(ROOT, 'ibon-info.js');
-const INFO_PARTS = ['src/info/00-core.js', 'src/agent/05-dom.js', 'src/info/10-ibon.js', 'src/info/20-adapter.js', 'src/info/30-auto.js', 'src/info/40-flow.js', 'src/info/90-boot.js'];
-const INFO_LIBS = ['eventinfo.js', 'ibon.js', 'reminders.js'];
-const INFO_BANNER = '// 這個檔案由 tools/build.mjs 從 src/info/、src/agent/05-dom.js 和 lib/eventinfo.js、lib/ibon.js、lib/reminders.js 產生，請改那些地方，不要直接改這裡。\n';
 
 function inlineLib(name) {
   const src = fs.readFileSync(path.join(ROOT, 'lib', name), 'utf8');
@@ -39,36 +33,17 @@ export function build() {
   return out;
 }
 
-/** ibon-info.js：只讀活動資訊的頁面程式 */
-export function buildInfo() {
-  let out = INFO_BANNER;
-  for (const f of INFO_PARTS) {
-    out += fs.readFileSync(path.join(ROOT, f), 'utf8');
-    if (f === 'src/info/00-core.js') out += '\n' + INFO_LIBS.map(inlineLib).join('');
-  }
-  return out;
-}
-
-const OUTPUTS = [[OUT, build], [INFO_OUT, buildInfo]];
-
-/** 產生出來的檔案有沒有過期：回傳過期的檔名 */
-export function stale() {
-  return OUTPUTS.filter(([file, fn]) => (fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '') !== fn()).map(([file]) => path.basename(file));
-}
-
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const next = build();
+  const cur = fs.existsSync(OUT) ? fs.readFileSync(OUT, 'utf8') : '';
   if (process.argv.includes('--check')) {
-    const old = stale();
-    if (old.length) {
-      console.error(`${old.join('、')} 不是最新的，請先執行 node tools/build.mjs`);
+    if (cur !== next) {
+      console.error('page-agent.js 不是最新的，請先執行 node tools/build.mjs');
       process.exit(1);
     }
-    console.log('agent.js、ibon-info.js 都是最新的');
+    console.log('page-agent.js 是最新的');
   } else {
-    for (const [file, fn] of OUTPUTS) {
-      const next = fn();
-      fs.writeFileSync(file, next);
-      console.log(`已產生 ${path.basename(file)}，${next.split('\n').length} 行`);
-    }
+    fs.writeFileSync(OUT, next);
+    console.log(`已產生 page-agent.js，${next.split('\n').length} 行`);
   }
 }

@@ -1,29 +1,29 @@
 {
   "manifest_version": 3,
-  "name": "一般票券訂票助手",
-  "version": "0.8.8",
-  "description": "一般票券的購票輔助：照你的偏好選時段與張數、填你提供的購票人資料，停在確認頁由你自己確認。遇到排隊、驗證碼、機器人檢查一律停下來交給你。選購只支援本機的一般票券模擬站；ibon 的活動頁與購票頁只讀取資訊、比對你的需求，不選票、不送出。",
+  "name": "ibon 訂票助手",
+  "version": "0.9.0",
+  "description": "ibon 定時開頁、對時、依場次與票區關鍵字選票區與張數、勾同意約款並按下一步；驗證碼、排隊、付款一律由你自己處理。",
   "minimum_chrome_version": "111",
-  "permissions": ["storage", "alarms", "notifications", "tabs", "webRequest"],
-  "host_permissions": ["http://127.0.0.1/pool/*", "http://localhost/pool/*"],
+  "permissions": ["storage", "alarms", "notifications", "tabs"],
+  "host_permissions": ["https://ticket.ibon.com.tw/*", "https://orders.ibon.com.tw/*"],
   "background": { "service_worker": "background.js", "type": "module" },
   "action": {
     "default_popup": "popup.html",
-    "default_title": "一般票券訂票助手",
+    "default_title": "ibon 訂票助手",
     "default_icon": { "16": "icons/icon16.png", "32": "icons/icon32.png" }
   },
   "content_scripts": [
     {
-      "matches": ["http://127.0.0.1/pool/*", "http://localhost/pool/*"],
-      "js": ["agent.js"],
-      "run_at": "document_end",
-      "world": "ISOLATED",
+      "matches": ["https://ticket.ibon.com.tw/ActivityInfo/Details/*", "https://orders.ibon.com.tw/application/UTK02/*"],
+      "js": ["alert-hook.js"],
+      "run_at": "document_start",
+      "world": "MAIN",
       "all_frames": false
     },
     {
       "matches": ["https://ticket.ibon.com.tw/ActivityInfo/Details/*", "https://orders.ibon.com.tw/application/UTK02/*"],
-      "js": ["ibon-info.js"],
-      "run_at": "document_idle",
+      "js": ["page-agent.js"],
+      "run_at": "document_start",
       "world": "ISOLATED",
       "all_frames": false
     }

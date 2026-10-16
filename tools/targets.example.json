@@ -1,0 +1,3 @@
+{
+  "windows-pc": { "type": "ssh-windows", "host": "使用者@主機位址", "path": "D:\\使用者\\Downloads\\ibon-ticket-helper" }
+}

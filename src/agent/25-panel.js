@@ -1,5 +1,4 @@
-  /* ───────────────────────── 畫面面板 ─────────────────────────
-   * 頁面右上角的狀態面板；標題 PANEL_TITLE 在 00-core.js 定義。 */
+  /* ───────────────────────── 畫面面板 ───────────────────────── */
 
   const PANEL_CSS = `
     .box { font: 13px/1.5 system-ui, "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", sans-serif;
@@ -46,7 +45,7 @@
     const hd = mk('div', 'hd');
     const btn = mk('button', '', '取消任務');
     btn.type = 'button';
-    hd.append(mk('span', '', PANEL_TITLE), btn);
+    hd.append(mk('span', '', 'ibon 訂票助手'), btn);
     const p = { host, st: mk('div', 'st'), cd: mk('div', 'cd'), lg: mk('ol'), btn };
     box.append(hd, p.st, p.cd, p.lg);
     root.appendChild(box);
@@ -69,7 +68,7 @@
   }
 
   /**
-   * 面板中間的大字（平常顯示倒數）。網站處理比較久時可以改成「處理中 N 秒」，讓你知道它沒當掉。
+   * 面板中間的大字（平常顯示倒數）。KKTIX 處理中時改成「處理中 N 秒」，讓你知道它沒當掉。
    * 同樣的字也放在面板外框的 data-big 上，面板是封閉的 shadow root，測試只讀得到外框。
    */
   function setBig(text) {

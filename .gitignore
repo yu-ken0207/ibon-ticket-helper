@@ -5,3 +5,4 @@ preset.json
 *.pem
 node_modules/
 __pycache__/
+tools/targets.local.json

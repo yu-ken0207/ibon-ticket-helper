@@ -17,7 +17,7 @@
   }
 
   /**
-   * 跟網站的伺服器對時，回傳 { offset, reliable }，失敗回傳 null。
+   * 跟 ibon 伺服器對時，回傳 { offset, reliable }，失敗回傳 null。
    * 網頁在背景時，Chrome 會把計時器對齊到整秒，跨秒的時間點會量偏將近一秒（2026-10-15 在一台 Windows 電腦量到「本機快 947 ms」）。
    * 所以對時期間只要網頁進過背景、或任何一次等待被拖長，這次結果就不採用，維持原本的值，等網頁回到前景再對。
    */
@@ -39,7 +39,7 @@
       return { offset: before, reliable: false };
     };
     try {
-      const url = location.origin + '/robots.txt';
+      const url = location.origin + '/assets/favicon.ico';
       let prev = null;
       let coarse = null;
       for (let i = 0; i < maxProbe && !coarse; i++) {
@@ -121,7 +121,7 @@
       if (document.hidden && left < 20000 && Date.now() - lastHiddenWarn > 5000) {
         lastHiddenWarn = Date.now();
         setStatus('這個分頁不在前景，瀏覽器可能拖慢計時！請把它切到前景', 'warn');
-        send('warn', { kind: 'hidden', msg: '購票頁被切到背景或最小化了，開賣時可能晚好幾秒。請讓它保持在前景。' });
+        send('warn', { kind: 'hidden', msg: '選票頁被切到背景或最小化了，開賣時可能晚好幾秒。請讓它保持在前景。' });
       }
       if (left > 3000) await sleep(200);
       else if (left > 60) await sleep(16);
