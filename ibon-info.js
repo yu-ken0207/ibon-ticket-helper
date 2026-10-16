@@ -103,6 +103,12 @@
   }
 
   /** 場次旁的備註：「2026/11/13 12:00截止」→ { saleEnd }（真站看過）；「2026/10/20 12:00 開賣」→ { saleStart }（推測的寫法，真站還沒看過）；其他回 {} */
+  /** 台灣時間（ibon 寫的時間）「2026-10-16T12:00」→ 毫秒；只有日期回 NaN */
+  function twMs(iso) {
+    const m = String(iso || '').match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/);
+    return m ? Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]) - 8, Number(m[5])) : NaN;
+  }
+
   function parseSessionNote(note) {
     const t = oneLine(note);
     const iso = isoOf(parseDateTime(t));
@@ -155,6 +161,10 @@
       // 「票價：」後面沒有數字，票價寫在下一行
       if (!/\d/.test(body.replace(/^.*?(票價|Ticket\s*Price|售價|價格)/i, '')) && all[i + 1]) body += ' ' + all[i + 1];
       lines.push(body);
+      // 加購條件（「單張最低票價達200-399元票價可加購高鐵單程票」，真站 39998）不是票價：整行不取金額
+      if (/加購/.test(body)) continue;
+      // 金額區間、門檻（「200-399元」「400元以上」）不是某個票區的價格
+      body = body.replace(/\d[\d,]*\s*[-–~～至]\s*\d[\d,]*\s*元/g, ' ').replace(/\d[\d,]*\s*元?\s*(以上|以下|起)/g, ' ');
       for (const m of body.matchAll(WITH_DOLLAR)) add(m[1], toNum(m[2]));
       for (const m of body.matchAll(WITH_YUAN)) add(m[1], toNum(m[2]));
       // 沒有名稱的金額：上面沒抓到的才補上
@@ -183,17 +193,25 @@
    */
   function buildEventInfo(raw, now = Date.now()) {
     const r = raw || {};
+    const pick = (fn, empty) => { const x = fn(r.description); return empty(x) && r.fullText ? fn(r.fullText) : x; };
+    const saleTimes = pick(parseSaleTimes, (x) => !x.length);
+    const futureSale = saleTimes.map((x) => twMs(x.at)).filter((t) => t > now).sort((a, b) => a - b)[0];
     const sessions = (r.sessions || []).map((s) => {
       const dt = parseDateTime(s.when);
-      const st = sessionStatus(s.button, !!s.disabled);
+      let st = sessionStatus(s.button, !!s.disabled);
+      const ownStart = parseSessionNote(s.note).saleStart;
+      const startMs = ownStart ? twMs(ownStart) : futureSale;
+      // 開賣前「線上購票」是灰的（真站 39998，2026-10-16 看過）：開賣時間還沒到才當成尚未開賣，照實寫是推斷的；時間過了還是灰的就維持看不出來
+      if (st.status === 'unknown' && s.disabled && /線上購票/.test(oneLine(s.button)) && startMs > now) {
+        st = { status: 'not-open', label: '尚未開賣（「線上購票」還不能按，開賣時間還沒到）', inferred: true };
+      }
       return {
         when: oneLine(s.when), date: dt ? dt.date : null, time: dt ? dt.time : null,
         name: oneLine(s.name), venue: oneLine(s.venue),
-        status: st.status, statusLabel: st.label, note: oneLine(s.note),
+        status: st.status, statusLabel: st.label, inferred: !!st.inferred, note: oneLine(s.note),
         ...parseSessionNote(s.note),
       };
     });
-    const pick = (fn, empty) => { const x = fn(r.description); return empty(x) && r.fullText ? fn(r.fullText) : x; };
     const p = pick(parsePrices, (x) => !x.prices.length);
     return {
       url: r.url || '',
@@ -202,7 +220,7 @@
       sessions,
       prices: p.prices,
       priceLines: p.lines,
-      saleTimes: pick(parseSaleTimes, (x) => !x.length),
+      saleTimes,
       limits: parseLimits(r.notice || r.fullText || r.description),
       readAt: now,
     };
@@ -226,7 +244,7 @@
       offers: arr(i.offers, 6).map(obj).map((o) => ({ label: str(o.label, 20), value: str(o.value, 100) })),
       sessions: arr(i.sessions, 50).map(obj).map((x) => ({
         when: str(x.when, 40), date: date(x.date), time: time(x.time), name: str(x.name, 120), venue: str(x.venue, 80),
-        status: STATUSES.includes(x.status) ? x.status : 'unknown', statusLabel: str(x.statusLabel, 60), note: str(x.note, 80),
+        status: STATUSES.includes(x.status) ? x.status : 'unknown', statusLabel: str(x.statusLabel, 60), inferred: x.inferred === true, note: str(x.note, 80),
         saleEnd: iso(x.saleEnd), saleStart: iso(x.saleStart),
       })),
       prices: arr(i.prices, 30).map(obj).filter((x) => Number.isFinite(x.price) && x.price > 0 && x.price < 1e7)
@@ -316,6 +334,12 @@
   }
   const ibDt = (iso) => String(iso || '').replace('T', ' ').replace(/-/g, '/');
   const ibDays = (ms) => Math.floor(ms / 86400000);
+  /** 剩下多久：一天以上寫幾天，不到一天寫幾小時幾分（真站 39998：當天開賣原本寫成「還有 0 天」） */
+  const ibLeft = (ms) => {
+    if (ms >= 86400000) return `${ibDays(ms)} 天`;
+    const m = Math.max(1, Math.round(ms / 60000));
+    return m >= 60 ? `約 ${Math.floor(m / 60)} 小時 ${m % 60} 分` : `約 ${m} 分鐘`;
+  };
 
   /**
    * 讀到的活動資訊做基本檢查 → [{ level: 'warn' | 'info', msg }]。只提示，不擋任何事。
@@ -337,7 +361,7 @@
     if (!sale.length) out.push({ level: 'info', msg: '節目介紹裡沒有認得的開賣時間' });
     else {
       const next = sale.filter((x) => x.t > now).sort((a, b) => a.t - b.t)[0];
-      if (next) out.push({ level: 'info', msg: `開賣時間 ${ibDt(next.at)}（還有 ${ibDays(next.t - now)} 天）` });
+      if (next) out.push({ level: 'info', msg: `開賣時間 ${ibDt(next.at)}（還有 ${ibLeft(next.t - now)}）` });
       else out.push({ level: 'info', msg: `已經開賣（${ibDt(sale[0].at)}）` });
     }
     if (!(Array.isArray(i.prices) && i.prices.length)) out.push({ level: 'warn', msg: '節目介紹裡沒有認得的票價；實際票區與票價要在購票頁看' });
@@ -346,13 +370,23 @@
 
   /** 限購規定的原文 → 一般會員每次最多幾張（身障、陪同票的另外規定不算）；看不出來回 null */
   function memberLimit(limits) {
-    let min = null;
-    for (const line of Array.isArray(limits) ? limits : []) {
+    const r = limitInfo(limits);
+    return r ? r.n : null;
+  }
+
+  /** 同上，加上範圍：{ n, scope: '每位會員' | '每筆交易' | '' }；全形數字「限購４張」也認得（真站 39998 看過） */
+  function limitInfo(limits) {
+    let best = null;
+    for (const raw of Array.isArray(limits) ? limits : []) {
+      const line = String(raw).replace(/[０-９]/g, (d) => String.fromCharCode(d.charCodeAt(0) - 0xFF10 + 48));
       if (/身障|身心障礙|陪同|周邊|商品/.test(line)) continue;
-      const m = String(line).match(/限購\s*(\d{1,2})\s*張/);
-      if (m) min = min == null ? Number(m[1]) : Math.min(min, Number(m[1]));
+      const m = line.match(/限購\s*(\d{1,2})\s*張/);
+      if (!m) continue;
+      const n = Number(m[1]);
+      const scope = /每位會員|每人|每個帳號/.test(line) ? '每位會員' : /每筆/.test(line) ? '每筆交易' : '';
+      if (!best || n < best.n) best = { n, scope };
     }
-    return min;
+    return best;
   }
 
   /** 設定頁的需求（票區偏好一行一個、張數、最高單價）→ 整理過的格式 */
