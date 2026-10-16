@@ -30,6 +30,7 @@
     <textarea id="keywords" rows="3" placeholder="2F 一般席" spellcheck="false"></textarea>
   </label>
   <p class="hint">一行一組，越上面越優先。同一行用空格隔開，代表每一段都要出現在票區名稱裡，例如「2F 一般席」。票區名稱要進購票流程才看得到。</p>
+  <div id="kwHints" class="kwhints"></div>
   <div class="checkrow">
     <button id="btnHealth" class="small" type="button">健檢</button>
     <span class="hint">檢查 ibon 活動頁還是不是助手認得的樣子、有沒有改版，不會買票</span>
@@ -45,6 +46,7 @@
       <input id="openTime" type="datetime-local" step="1">
     </label>
   </div>
+  <p id="saleHint" class="hint" role="status"></p>
 
   <details>
     <summary>進階設定</summary>
@@ -72,6 +74,7 @@
       </label>
       <label class="check"><input id="autoAgree" type="checkbox" checked> 自動勾選「同意」約款</label>
     </div>
+    <label class="check"><input id="allowNonAdjacent" type="checkbox"> 座位/數量頁有「接受不連號座位」時幫我勾選</label>
   </details>
 
   <div class="buttons">

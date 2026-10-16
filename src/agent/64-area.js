@@ -28,14 +28,14 @@
     return { text: `${name} ${price} ${seat}`, name, price, seat, left, unavailable };
   }
 
-  /** 選票區頁：照關鍵字、排除字選票區 */
-  async function runArea(cfg) {
+  /** 選票區頁：照關鍵字、排除字選票區；之前售完過的票區（d.failedAreas）跳過 */
+  async function runArea(cfg, d = {}) {
     setStatus('選票區中…', 'ok');
     const t0 = Date.now();
     let rows = areaRows();
     while (!rows.length && Date.now() - t0 < 20000 && !state.aborted) {
       // 有些活動票區與張數在同一頁：直接照座位/數量頁的做法
-      if (qtyPrice() || qtySelects().length) { log('這一頁直接出現張數，票區與張數在同一頁'); return runQty(cfg); }
+      if (qtyPrice() || qtySelects().length) { log('這一頁直接出現張數，票區與張數在同一頁'); return runQty(cfg, d); }
       if (challengeText()) {
         if (!(await waitChallenge(60000))) return finish(false, 'challenge', 'ibon 的「正在驗證您是否是人類」一分鐘還沒通過，請你自己看畫面', { handOff: true });
         continue;
@@ -48,8 +48,12 @@
     if (state.aborted) return;
     if (!rows.length) return finish(false, 'no-area-table', '票區頁一直沒有出現票區表格。可能是 ibon 改版了，請直接看畫面', { handOff: true });
     const qty = Math.max(1, Math.min(Number(cfg.qty) || 1, 10));
-    const infos = rows.map((r) => areaInfo(r, qty));
+    const failed = d.failedAreas || [];
+    const infos = rows.map((r) => areaInfo(r, qty)).map((x) => (isFailedArea(x.name, failed) ? { ...x, unavailable: true } : x));
     const texts = infos.map((x) => x.text);
+    // 記下這場的票區名稱，彈出視窗下次讀取這個活動時當成關鍵字的參考
+    send('areas-seen', { names: infos.map((x) => `${x.name} ${x.price}`) });
+    if (failed.length) log(`跳過之前售完的票區：${failed.join('、')}`);
     const pick = pickOption(infos, cfg);
     if (pick.kind === 'sold-out') return finish(false, 'sold-out', `對到的票區都賣完了，或剩下的張數不夠 ${qty} 張：${pick.names.join('、')}`);
     if (pick.kind === 'blocked') return finish(false, 'blocked', `對到的票區都在排除清單裡：${pick.names.join('、')}`, { handOff: true });
@@ -60,10 +64,8 @@
     if (pick.kind === 'fallback') log(`關鍵字都沒比對到，照遞補設定改選第一個還能買的：${pick.text}`, 'warn');
     else log(`選中票區：${pick.text}`);
     const row = rows[pick.index];
-    const before = state.alerts.length;
-    pageClick(row.querySelector('a[href], a[onclick]') || row);
-    const out = await watchAfterClick(before, 30000, '正在處理票區');
-    if (out.kind === 'alert') return handleAlert(out, '選票區');
+    const out = await clickAndWatch(row.querySelector('a[href], a[onclick]') || row, 30000, '正在處理票區');
+    if (out.kind === 'alert') return handleAlert(out, '選票區', { areaText: infos[pick.index].name });
     if (out.kind === 'timeout') return finish(false, 'no-advance', '選了票區但等了 30 秒頁面沒有進到下一步，請自己看畫面', { handOff: true });
     return undefined;
   }

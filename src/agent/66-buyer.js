@@ -34,10 +34,8 @@
       handToUser(next);
       return finish(false, 'name-based', '這場是實名制，請自己填寫持票人資料後按下一步（名額已保留，注意剩餘時間）', { handOff: true });
     }
-    const before = state.alerts.length;
-    pageClick(next);
     log('按下「下一步」');
-    const out = await watchAfterClick(before, 45000, '正在處理');
+    const out = await clickAndWatch(next, 45000, '正在處理');
     // 這一頁名額已經保留：被網站擋下時不重新整理（重新整理可能弄丟保留的名額），交給你看
     if (out.kind === 'alert') return finish(false, 'rejected', `按下一步時 ibon 回覆「${out.msg}」。名額還在保留中，請自己看畫面，先不要重新整理`, { handOff: true });
     if (out.kind === 'timeout') return finish(false, 'timeout', '按下一步後等了 45 秒頁面還是沒有反應，請看畫面，先不要重新整理', { handOff: true });

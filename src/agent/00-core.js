@@ -108,7 +108,12 @@
   window.addEventListener('message', (ev) => {
     if (ev.source !== window || ev.origin !== location.origin) return;
     const d = ev.data;
-    if (d && d.__ith === 'alert' && typeof d.msg === 'string') state.alerts.push(d.msg.slice(0, 300));
+    if (!d || d.__ith !== 'alert' || typeof d.msg !== 'string') return;
+    const msg = d.msg.slice(0, 300);
+    state.alerts.push(msg);
+    // 等結果的那幾秒 alert-hook.js 接管了對話框，沒有跳出來：寫進面板讓你知道 ibon 說了什麼
+    if (d.kind === 'confirm' && d.caught) log(`ibon 詢問「${msg.slice(0, 60)}」，助手按了${d.answer ? '確定' : '否'}`, 'warn');
+    else if (d.caught) log(`ibon 訊息：「${msg.slice(0, 80)}」`, 'warn');
   });
 
   function log(msg, level = 'info') {

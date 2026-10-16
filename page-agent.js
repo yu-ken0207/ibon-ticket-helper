@@ -109,7 +109,12 @@
   window.addEventListener('message', (ev) => {
     if (ev.source !== window || ev.origin !== location.origin) return;
     const d = ev.data;
-    if (d && d.__ith === 'alert' && typeof d.msg === 'string') state.alerts.push(d.msg.slice(0, 300));
+    if (!d || d.__ith !== 'alert' || typeof d.msg !== 'string') return;
+    const msg = d.msg.slice(0, 300);
+    state.alerts.push(msg);
+    // 等結果的那幾秒 alert-hook.js 接管了對話框，沒有跳出來：寫進面板讓你知道 ibon 說了什麼
+    if (d.kind === 'confirm' && d.caught) log(`ibon 詢問「${msg.slice(0, 60)}」，助手按了${d.answer ? '確定' : '否'}`, 'warn');
+    else if (d.caught) log(`ibon 訊息：「${msg.slice(0, 80)}」`, 'warn');
   });
 
   function log(msg, level = 'info') {
@@ -211,7 +216,7 @@
     return 'other';
   }
 
-  /** ibon 上不會自己恢復、助手也管不到的頁面：登入頁、持卡人優先購的驗證頁（ibon 網址自己拼成 Vaildate，tickets_hunter）、錯誤頁，其他回傳 null */
+  /** ibon 上不會自己恢復、助手也管不到的頁面：登入頁、持卡人優先購的驗證頁（ibon 網址自己拼成 Vaildate，tickets_hunter）、錯誤頁、首頁（被踢回首頁），其他回傳 null */
   function offTrackKind(url) {
     let u;
     try { u = new URL(url); } catch (_) { return null; }
@@ -219,6 +224,8 @@
     if (!isIbonHost(url)) return null;
     if (u.hostname === ACTIVITY_HOST && /^\/vaildate\//i.test(u.pathname)) return 'card-validate';
     if (/^\/(error|500|404)/i.test(u.pathname)) return 'error-page';
+    // 被踢回首頁（tickets_hunter 認的兩個網址）：kktix 助手也會把分頁帶回去
+    if (u.hostname === ACTIVITY_HOST && /^\/(index\/entertainment)?\/?$/i.test(u.pathname)) return 'home';
     return null;
   }
 
@@ -234,7 +241,7 @@
 
   const nz = (s) => String(s == null ? '' : s).replace(/[\s　]+/g, ' ').trim();
   const lc = (s) => nz(s).toLowerCase();
-  const SOLD_OUT_RE = /已售完|售完|已額滿|額滿|暫無|無法購買|已截止/;
+  const SOLD_OUT_RE = /已售完|售完|已額滿|額滿|暫無|無法購買|已截止|選購一空|尚無票/;
 
   /** 一行一個，也接受逗號、頓號分隔 */
   function parseList(v) {
@@ -1073,10 +1080,47 @@
     return !challengeText();
   }
 
-  /** alert 的結果：登入問題交給你，其他算被拒絕，照額度重試 */
-  async function handleAlert(out, label) {
+  /**
+   * 按下去並等結果。等的這段時間請 alert-hook.js 接管對話框：alert 不跳出來（不然頁面會停住、要你按確定），
+   * 照 kktix 助手「只在等結果的那幾秒接管」的做法，等完就交還。換頁成功時這個頁面已經卸載，新頁面一開始就不接管。
+   */
+  async function clickAndWatch(el, maxMs, label) {
+    const before = state.alerts.length;
+    window.postMessage({ __ith: 'catch', ms: maxMs + 2000 }, location.origin);
+    pageClick(el);
+    try {
+      return await watchAfterClick(before, maxMs, label);
+    } finally {
+      window.postMessage({ __ith: 'catch', ms: 0 }, location.origin);
+    }
+  }
+
+  /* 售完的票區：記在背景程式的任務裡，回到選區頁時跳過，改選下一個（tickets_hunter 也是售完就回選區頁換別區）。 */
+  const SOLD_OUT_MSG = /已售完|售完|選購一空|尚無票|額滿|已無票|No tickets available|Sold out/i;
+
+  /** 這個票區是不是之前售完過：記的可能是「1F 鐵粉席 1,000」或只有「鐵粉席」，互相包含就算 */
+  function isFailedArea(name, failed) {
+    const n = norm(name);
+    return !!n && (failed || []).some((f) => { const x = norm(f); return !!x && (x.includes(n) || n.includes(x)); });
+  }
+
+  async function markAreaFailed(text) {
+    if (!text) return;
+    log(`票區「${text}」賣完了，之後跳過它`, 'warn');
+    await call('area-failed', { text }, 1500);
+  }
+
+  /**
+   * alert 的結果：登入問題交給你；說售完而且知道是哪個票區 → 記下來，回選區頁（或重新整理這頁）換下一個；
+   * 其他算被拒絕，照額度重試。opts：{ areaText 這次選的票區, areaUrl 選區頁網址（在座位/數量頁才有） }
+   */
+  async function handleAlert(out, label, opts = {}) {
     if (/登入|sign in|log in/i.test(out.msg)) return finish(false, 'guest', `ibon 要求登入：「${out.msg}」`, { handOff: true });
     blackbox('rejected', `ibon 回覆「${out.msg}」`);
+    if (SOLD_OUT_MSG.test(out.msg) && opts.areaText) {
+      await markAreaFailed(opts.areaText);
+      return retry('fail', `${label}時 ibon 回覆「${out.msg}」，換別的票區`, opts.areaUrl);
+    }
     return retry('fail', `${label}時 ibon 回覆「${out.msg}」`);
   }
 
@@ -1094,8 +1138,8 @@
       const kind = pageKind();
       if (kind === 'event') await runEvent(cfg, d);
       else if (kind === 'verify') await runVerify(cfg);
-      else if (kind === 'area') await runArea(cfg);
-      else if (kind === 'qty') await runQty(cfg);
+      else if (kind === 'area') await runArea(cfg, d);
+      else if (kind === 'qty') await runQty(cfg, d);
       else if (kind === 'buyer') await runBuyer(cfg);
     } catch (e) {
       await finish(false, 'error', '程式錯誤：' + (e && e.message ? e.message : e));
@@ -1230,11 +1274,9 @@
     if (!btn || st.status !== 'on-sale') {
       return retry('not-open', `場次「${sessionKey(cfg.sessionWhen)}」還不能買（按鈕：${info.button || '沒有'}${info.disabled ? '，灰的' : ''}）`);
     }
-    const before = state.alerts.length;
     log(`場次「${sessionKey(cfg.sessionWhen)}」可以買了，按下「${info.button}」`);
     setStatus('按下線上購票…', 'ok');
-    pageClick(btn);
-    const out = await watchAfterClick(before, 20000, '正在進入購票流程');
+    const out = await clickAndWatch(btn, 20000, '正在進入購票流程');
     if (out.kind === 'alert') return handleAlert(out, '按下線上購票');
     if (out.kind === 'timeout') return retry('fail', '按下線上購票後 20 秒頁面沒有反應');
     return undefined;
@@ -1278,14 +1320,14 @@
     return { text: `${name} ${price} ${seat}`, name, price, seat, left, unavailable };
   }
 
-  /** 選票區頁：照關鍵字、排除字選票區 */
-  async function runArea(cfg) {
+  /** 選票區頁：照關鍵字、排除字選票區；之前售完過的票區（d.failedAreas）跳過 */
+  async function runArea(cfg, d = {}) {
     setStatus('選票區中…', 'ok');
     const t0 = Date.now();
     let rows = areaRows();
     while (!rows.length && Date.now() - t0 < 20000 && !state.aborted) {
       // 有些活動票區與張數在同一頁：直接照座位/數量頁的做法
-      if (qtyPrice() || qtySelects().length) { log('這一頁直接出現張數，票區與張數在同一頁'); return runQty(cfg); }
+      if (qtyPrice() || qtySelects().length) { log('這一頁直接出現張數，票區與張數在同一頁'); return runQty(cfg, d); }
       if (challengeText()) {
         if (!(await waitChallenge(60000))) return finish(false, 'challenge', 'ibon 的「正在驗證您是否是人類」一分鐘還沒通過，請你自己看畫面', { handOff: true });
         continue;
@@ -1298,8 +1340,12 @@
     if (state.aborted) return;
     if (!rows.length) return finish(false, 'no-area-table', '票區頁一直沒有出現票區表格。可能是 ibon 改版了，請直接看畫面', { handOff: true });
     const qty = Math.max(1, Math.min(Number(cfg.qty) || 1, 10));
-    const infos = rows.map((r) => areaInfo(r, qty));
+    const failed = d.failedAreas || [];
+    const infos = rows.map((r) => areaInfo(r, qty)).map((x) => (isFailedArea(x.name, failed) ? { ...x, unavailable: true } : x));
     const texts = infos.map((x) => x.text);
+    // 記下這場的票區名稱，彈出視窗下次讀取這個活動時當成關鍵字的參考
+    send('areas-seen', { names: infos.map((x) => `${x.name} ${x.price}`) });
+    if (failed.length) log(`跳過之前售完的票區：${failed.join('、')}`);
     const pick = pickOption(infos, cfg);
     if (pick.kind === 'sold-out') return finish(false, 'sold-out', `對到的票區都賣完了，或剩下的張數不夠 ${qty} 張：${pick.names.join('、')}`);
     if (pick.kind === 'blocked') return finish(false, 'blocked', `對到的票區都在排除清單裡：${pick.names.join('、')}`, { handOff: true });
@@ -1310,10 +1356,8 @@
     if (pick.kind === 'fallback') log(`關鍵字都沒比對到，照遞補設定改選第一個還能買的：${pick.text}`, 'warn');
     else log(`選中票區：${pick.text}`);
     const row = rows[pick.index];
-    const before = state.alerts.length;
-    pageClick(row.querySelector('a[href], a[onclick]') || row);
-    const out = await watchAfterClick(before, 30000, '正在處理票區');
-    if (out.kind === 'alert') return handleAlert(out, '選票區');
+    const out = await clickAndWatch(row.querySelector('a[href], a[onclick]') || row, 30000, '正在處理票區');
+    if (out.kind === 'alert') return handleAlert(out, '選票區', { areaText: infos[pick.index].name });
     if (out.kind === 'timeout') return finish(false, 'no-advance', '選了票區但等了 30 秒頁面沒有進到下一步，請自己看畫面', { handOff: true });
     return undefined;
   }
@@ -1338,9 +1382,52 @@
   const qtyNext = () => $(QTY.next) || $('a[id*="AddShopingCart"]') || $('#ctl00_ContentPlaceHolder1_A2')
     || deepAll('a.btn.btn-primary.btn-block').find((b) => isVisible(b) && /下一步/.test(b.textContent)) || null;
   const qtyCaptcha = () => deepAll(QTY.captcha).find(isVisible) || null;
+  // 「接受不連號座位」（tickets_hunter：div.not-consecutive > div.custom-control > span > input[type=checkbox]）
+  const qtyNonAdjacent = () => deepAll('div.not-consecutive input[type="checkbox"]').find(isVisible) || null;
 
-  /** 座位/數量頁：選票區價格（多票區才有）、選張數、按下一步；有驗證碼就停手 */
-  async function runQty(cfg) {
+  /** 這一頁現在選的票區（記售完用）：票區價格下拉選中的那一項，沒有就用數量表格第一格 */
+  function qtyAreaText() {
+    const p = qtyPrice();
+    if (p && p.selectedIndex > 0) return norm(p.options[p.selectedIndex].text);
+    const grid = qtyGrid();
+    const td = grid && grid.querySelector('td');
+    return td ? norm(td.textContent) : '';
+  }
+
+  /**
+   * 這個票區賣完了沒（照 tickets_hunter）：有數量下拉時，看有沒有大於 0 的選項；
+   * 沒有數量下拉時，看張數欄（AMOUNT_STR）或數量表格寫著售完。只看表格，不看整頁：票區下拉會列出別的票區「(已售完)」。
+   */
+  function qtySoldOut() {
+    const sels = qtySelects();
+    if (sels.length) return sels.every((s) => ![...s.options].some((o) => !o.disabled && Number(o.value) > 0));
+    const grid = qtyGrid();
+    return deepAll('span[id*="AMOUNT_STR"]').some((s) => SOLD_OUT_MSG.test(norm(s.textContent)))
+      || (!!grid && SOLD_OUT_MSG.test(norm(grid.innerText || grid.textContent)));
+  }
+
+  /** 選「票區價格」下拉（多票區才有）：照關鍵字、排除字挑，之前售完的跳過。選好回 true；挑不到（已經回報結果）回 false */
+  async function qtyPickPrice(cfg, price, failed, curArea) {
+    if (curArea) log(`「${curArea}」賣完了，改選別的票區`, 'warn');
+    const opts = [...price.options].slice(1).map((o) => ({ text: o.text, value: o.value, unavailable: isFailedArea(o.text, failed) }));
+    send('areas-seen', { names: opts.map((o) => norm(o.text)) });
+    const pick = pickOption(opts, cfg);
+    let stop = null;
+    if (pick.kind === 'sold-out') stop = finish(false, 'sold-out', `對到的票區都賣完了：${pick.names.join('、')}`);
+    else if (pick.kind === 'blocked') stop = finish(false, 'blocked', `對到的票區都在排除清單裡：${pick.names.join('、')}`, { handOff: true });
+    else if (pick.kind === 'no-match') stop = finish(false, 'no-match', `關鍵字比對不到任何票區。可選的有：${opts.map((o) => o.text).join(' ／ ')}。請自己選`, { handOff: true });
+    if (stop) { await stop; return false; }
+    log(pick.kind === 'fallback' ? `關鍵字都沒比對到，改選第一個還能買的：${pick.text}` : `選中票區：${pick.text}`, pick.kind === 'fallback' ? 'warn' : 'info');
+    if (!setSelect(price, opts[pick.index].value)) { await finish(false, 'fill-failed', '票區價格選不起來', { handOff: true }); return false; }
+    await sleep(4000);   // ibon 會回傳重畫整頁；換頁的話這個頁面已經卸載，由新頁面接著做
+    return !state.aborted;
+  }
+
+  /**
+   * 座位/數量頁：選票區價格（多票區才有）、選張數、按下一步；有驗證碼就停手。
+   * 這個票區賣完了：記下來（d.failedAreas 是之前售完的），同一頁還有別的票區就直接改選，沒有就回選區頁（d.areaUrl）換別區。
+   */
+  async function runQty(cfg, d = {}) {
     setStatus('選張數中…', 'ok');
     const t0 = Date.now();
     while (!qtyPrice() && !qtySelects().length && Date.now() - t0 < 20000 && !state.aborted) {
@@ -1353,24 +1440,31 @@
       await sleep(300);
     }
     if (state.aborted) return;
-    const price = qtyPrice();
-    if (price && price.selectedIndex <= 0) {
-      const opts = [...price.options].slice(1).map((o) => ({ text: o.text, value: o.value }));
-      const pick = pickOption(opts, cfg);
-      if (pick.kind === 'sold-out') return finish(false, 'sold-out', `對到的票區都賣完了：${pick.names.join('、')}`);
-      if (pick.kind === 'blocked') return finish(false, 'blocked', `對到的票區都在排除清單裡：${pick.names.join('、')}`, { handOff: true });
-      if (pick.kind === 'no-match') return finish(false, 'no-match', `關鍵字比對不到任何票區。可選的有：${opts.map((o) => o.text).join(' ／ ')}。請自己選`, { handOff: true });
-      log(pick.kind === 'fallback' ? `關鍵字都沒比對到，改選第一個還能買的：${pick.text}` : `選中票區：${pick.text}`, pick.kind === 'fallback' ? 'warn' : 'info');
-      if (!setSelect(price, opts[pick.index].value)) return finish(false, 'fill-failed', '票區價格選不起來', { handOff: true });
-      await sleep(4000);   // ibon 會回傳重畫整頁；換頁的話這個頁面已經卸載，由新頁面接著做
-      if (state.aborted) return;
-      if (!qtySelects().length) return finish(false, 'no-qty', '選了票區價格但沒有出現購買數量，請自己看畫面', { handOff: true });
+    const failed = [...(d.failedAreas || [])];
+    for (let round = 0; round < 5; round++) {
+      const price = qtyPrice();
+      const curArea = price && price.selectedIndex > 0 ? norm(price.options[price.selectedIndex].text) : '';
+      if (price && (price.selectedIndex <= 0 || isFailedArea(curArea, failed))) {
+        if (!(await qtyPickPrice(cfg, price, failed, curArea))) return;
+        if (!qtySelects().length) return finish(false, 'no-qty', '選了票區價格但沒有出現購買數量，請自己看畫面', { handOff: true });
+      }
+      if (!qtySelects().length) return finish(false, 'no-qty', '找不到「購買數量」的下拉選單。可能是 ibon 改版了，請直接看畫面', { handOff: true });
+      if (!qtySoldOut()) return qtyFill(cfg, d);
+      const area = qtyAreaText();
+      await markAreaFailed(area);
+      failed.push(area);
+      const p = qtyPrice();
+      if (p && [...p.options].slice(1).some((o) => !isFailedArea(o.text, failed) && !SOLD_OUT_RE.test(o.text))) continue;   // 同一頁還有別的票區：直接改選
+      return retry('fail', `票區「${area}」賣完了，回選區頁換別的票區`, d.areaUrl);
     }
+    return finish(false, 'sold-out', '這一頁的票區試了好幾個都賣完了');
+  }
+
+  /** 選張數、（有開的話）勾不連號、按下一步 */
+  async function qtyFill(cfg, d) {
     const sel = qtySelects()[0];
-    if (!sel) return finish(false, 'no-qty', '找不到「購買數量」的下拉選單。可能是 ibon 改版了，請直接看畫面', { handOff: true });
-    const have = [...sel.options].map((o) => Number(o.value)).filter((n) => Number.isFinite(n) && n > 0);
+    const have = [...sel.options].filter((o) => !o.disabled).map((o) => Number(o.value)).filter((n) => Number.isFinite(n) && n > 0);
     const want = Math.max(1, Math.min(Number(cfg.qty) || 1, 10));
-    if (!have.length) return finish(false, 'sold-out', '這個票區沒有可以選的張數（可能剛賣完）');
     if (Math.max(...have) < want) return finish(false, 'qty-limit', `你要 ${want} 張，但這個票區最多只能選 ${Math.max(...have)} 張。請自己決定要不要買`, { handOff: true });
     if (!setSelect(sel, want)) return finish(false, 'fill-failed', `張數選不到 ${want}`, { handOff: true });
     log(`已選張數 ${want}`);
@@ -1389,18 +1483,25 @@
       const cur = qtySelects()[0];
       if (!cur || Number(cur.value) !== want) return finish(false, 'fill-failed', `張數一直被頁面重置，選不住 ${want}，請自己選`, { handOff: true });
     }
+    if (cfg.allowNonAdjacent) {
+      const box = qtyNonAdjacent();
+      if (box && !box.checked) {
+        pageClick(box);
+        await sleep(150);
+        if (box.checked) { log('已勾選「接受不連號座位」'); await settle(500, 4000, 400); }
+        else log('「接受不連號座位」勾不起來，照連號的座位買', 'warn');
+      }
+    }
     if (qtyCaptcha()) {
       handToUser(qtyCaptcha());
       return finish(false, 'captcha', '張數選好了。這一頁有驗證碼，請自己輸入後按下一步', { handOff: true });
     }
     const next = qtyNext();
     if (!next) return finish(false, 'no-next', '找不到「下一步」按鈕，請自己按', { handOff: true });
-    const before = state.alerts.length;
-    pageClick(next);
     log('按下「下一步」');
     setStatus('已按下一步…', 'ok');
-    const out = await watchAfterClick(before, 45000, '正在處理（可能在排隊或配位）');
-    if (out.kind === 'alert') return handleAlert(out, '按下一步');
+    const out = await clickAndWatch(next, 45000, '正在處理（可能在排隊或配位）');
+    if (out.kind === 'alert') return handleAlert(out, '按下一步', { areaText: qtyAreaText(), areaUrl: d.areaUrl });
     if (out.kind === 'timeout') return finish(false, 'timeout', '按下一步後等了 45 秒頁面還是沒有反應，請看畫面，先不要重新整理', { handOff: true });
     return undefined;
   }
@@ -1441,10 +1542,8 @@
       handToUser(next);
       return finish(false, 'name-based', '這場是實名制，請自己填寫持票人資料後按下一步（名額已保留，注意剩餘時間）', { handOff: true });
     }
-    const before = state.alerts.length;
-    pageClick(next);
     log('按下「下一步」');
-    const out = await watchAfterClick(before, 45000, '正在處理');
+    const out = await clickAndWatch(next, 45000, '正在處理');
     // 這一頁名額已經保留：被網站擋下時不重新整理（重新整理可能弄丟保留的名額），交給你看
     if (out.kind === 'alert') return finish(false, 'rejected', `按下一步時 ibon 回覆「${out.msg}」。名額還在保留中，請自己看畫面，先不要重新整理`, { handOff: true });
     if (out.kind === 'timeout') return finish(false, 'timeout', '按下一步後等了 45 秒頁面還是沒有反應，請看畫面，先不要重新整理', { handOff: true });
@@ -1466,16 +1565,20 @@
     if (!info.sessions.length) {
       return report({ ok: false, error: '沒有讀到任何場次（可能還沒開放、已下架，或頁面結構改了）', title: info.title });
     }
-    const sale = (info.saleTimes || [])[0];
-    const sessions = info.sessions.map((s) => ({ when: s.when, name: s.name, status: s.status, statusLabel: s.statusLabel }));
+    // 開賣時間（台灣時間）：節目介紹裡可能寫好幾個（預購、一般），場次旁的小字也可能有自己的開賣時間。
+    // 彈出視窗照你選的場次挑還沒到的那一個帶入
+    const saleTimes = (info.saleTimes || []).map((x) => x.at).filter(Boolean);
+    const upcoming = saleTimes.filter((at) => twMs(at) > Date.now()).sort();
+    const sessions = info.sessions.map((s) => ({ when: s.when, name: s.name, status: s.status, statusLabel: s.statusLabel, saleStart: s.saleStart || null }));
     const matched = cfg.sessionWhen ? sessions.filter((s) => sessionKey(s.when) === sessionKey(cfg.sessionWhen)).length : null;
-    const saleTxt = sale ? sale.at.replace('T', ' ').replace(/-/g, '/') : '節目介紹裡讀不到開賣時間';
+    const shown = upcoming[0] || saleTimes[0];
+    const saleTxt = shown ? `${shown.replace('T', ' ').replace(/-/g, '/')}${upcoming.length ? '' : '（已經開賣）'}` : '節目介紹裡讀不到開賣時間';
     const msg = `${info.title || '活動'}：${sessions.length} 個場次，開賣 ${saleTxt}`
       + (matched === 0 ? `。注意：你選的場次「${sessionKey(cfg.sessionWhen)}」不在這個清單裡` : '');
     setStatus(msg, matched === 0 ? 'err' : 'ok');
     return report({
-      ok: matched !== 0, msg, title: info.title, sessions, saleAt: sale ? sale.at : null,
-      prices: info.prices, limits: info.limits, warnings: raw.warnings || [],
+      ok: matched !== 0, msg, title: info.title, sessions, saleAt: upcoming[0] || null, saleTimes,
+      prices: info.prices, priceLines: info.priceLines, limits: info.limits, warnings: raw.warnings || [],
     });
   }
 

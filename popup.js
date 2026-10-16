@@ -24,6 +24,20 @@ function clock(ts) {
   const d = new Date(ts);
   return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
+/** ibon 寫的時間是台灣時間（「2026-10-16T12:00」）→ 毫秒；看不懂回 NaN */
+function twMs(iso) {
+  const m = String(iso || '').match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/);
+  return m ? Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4] - 8, +m[5]) : NaN;
+}
+/** 台灣時間 → 這台電腦的本地時間，給 datetime-local 欄位用（電腦不在台灣時區也對） */
+function twToLocalInput(iso) {
+  const t = twMs(iso);
+  if (!Number.isFinite(t)) return '';
+  const d = new Date(t);
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+const twText = (iso) => String(iso || '').replace('T', ' ').replace(/-/g, '/');
+
 function left(ms) {
   if (ms <= 0) return '時間到';
   const s = Math.floor(ms / 1000);
@@ -62,6 +76,7 @@ function readForm() {
     failMaxRetries: v('failMaxRetries'),
     syncClock: $('syncClock').checked,
     autoAgree: $('autoAgree').checked,
+    allowNonAdjacent: $('allowNonAdjacent').checked,
     exclude: v('exclude'),
     fallback: $('fallback').checked,
   };
@@ -74,6 +89,8 @@ function readForm() {
 
 /** 場次清單：存著讀取活動時的結果，選項是「演出時間」；表單存的場次不在清單裡也先放進去，不要憑空消失 */
 let sessionList = [];
+let eventSaleTimes = [];   // 節目介紹寫的開賣時間（台灣時間），可能有好幾個（預購、一般）
+let priceHints = [];       // 節目介紹寫的票價（名稱、金額），當成票區關鍵字的參考
 function fillSessions(list, selected) {
   sessionList = list || sessionList;
   const sel = $('sessionWhen');
@@ -92,15 +109,98 @@ function fillForm(c) {
     if (c[id] != null && c[id] !== '') $(id).value = c[id];
   }
   fillSessions(Array.isArray(c.sessionList) ? c.sessionList : [], c.sessionWhen || '');
+  eventSaleTimes = Array.isArray(c.saleTimes) ? c.saleTimes : [];
+  priceHints = Array.isArray(c.priceHints) ? c.priceHints : [];
   if (typeof c.syncClock === 'boolean') $('syncClock').checked = c.syncClock;
   if (typeof c.autoAgree === 'boolean') $('autoAgree').checked = c.autoAgree;
+  if (typeof c.allowNonAdjacent === 'boolean') $('allowNonAdjacent').checked = c.allowNonAdjacent;
   if (typeof c.fallback === 'boolean') $('fallback').checked = c.fallback;
 }
 
 let saveTimer = 0;
 function saveSoon() {
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => chrome.storage.local.set({ form: { ...readForm(), sessionList } }), 200);
+  saveTimer = setTimeout(() => chrome.storage.local.set({ form: { ...readForm(), sessionList, saleTimes: eventSaleTimes, priceHints } }), 200);
+}
+
+/* ───────────── 開賣時間：照選的場次帶入還沒到的那一個 ───────────── */
+
+/** 選的場次的開賣時間：場次旁有自己的開賣時間就用它，沒有就用節目介紹寫的、還沒到的最早那一個 */
+function saleTimeFor(when) {
+  const s = sessionList.find((x) => x.when === when);
+  const own = !!(s && s.saleStart);
+  const list = own ? [s.saleStart] : eventSaleTimes;
+  const future = list.filter((at) => twMs(at) > Date.now()).sort();
+  return { at: future[0] || null, last: list.slice().sort().pop() || null, own };
+}
+
+/** 帶入開賣時間並說明從哪裡來的；回傳說明文字 */
+function applySaleTime() {
+  const r = saleTimeFor($('sessionWhen').value);
+  let msg;
+  if (r.at) {
+    const v = twToLocalInput(r.at);
+    if ($('openTime').value.slice(0, 16) !== v) $('openTime').value = v;
+    msg = `開賣時間已帶入 ${twText(r.at)}（${r.own ? '這一場自己寫的' : '活動頁的節目介紹寫的'}，台灣時間）`;
+  } else if (r.last) {
+    msg = `活動頁寫的開賣時間 ${twText(r.last)} 已經過了。現在就能買的話請按「立即執行」`;
+  } else {
+    msg = sessionList.length ? '活動頁沒寫開賣時間，請自己填' : '';
+  }
+  $('saleHint').textContent = msg;
+  return msg;
+}
+
+/* ───────────── 票區關鍵字的建議 ───────────── */
+
+const slugOf = (url) => { const m = String(url || '').match(/ticket\.ibon\.com\.tw\/ActivityInfo\/Details\/(\d+)/i); return m ? m[1] : null; };
+/** 「2F 一般席 350」→ 關鍵字「2F 一般席」（後面的金額拿掉） */
+const keywordOf = (label) => String(label).replace(/\s*(NT\$?\s*)?[\d,]+\s*元?\s*$/i, '').trim() || String(label).trim();
+const excludedBy = (text) => {
+  const ex = $('exclude').value.split(/[\r\n,，、]+/).map((x) => x.trim().toLowerCase()).filter(Boolean);
+  return ex.find((x) => text.toLowerCase().includes(x)) || null;
+};
+
+function addKeyword(kw) {
+  const lines = $('keywords').value.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  if (!lines.includes(kw)) lines.push(kw);
+  $('keywords').value = lines.join('\n');
+  saveSoon();
+}
+
+function chipsOf(labels) {
+  const row = el('div', { class: 'chips' });
+  for (const label of labels) {
+    const kw = keywordOf(label);
+    const ex = excludedBy(label);
+    const b = el('button', { type: 'button', class: 'small chip' }, ex ? `${label}（排除：${ex}）` : label);
+    if (ex) b.disabled = true;
+    else b.addEventListener('click', () => addKeyword(kw));
+    row.append(b);
+  }
+  return row;
+}
+
+/** 關鍵字欄下面的建議：上次在購票頁看到的這場票區、節目介紹寫的票價；都沒有就說明怎麼辦 */
+async function renderKeywordHints() {
+  const box = $('kwHints');
+  const slug = slugOf($('eventUrl').value);
+  const { areaSeen = {} } = await chrome.storage.local.get('areaSeen');
+  const seen = slug ? areaSeen[slug] : null;
+  box.replaceChildren();
+  let any = false;
+  if (seen && seen.names && seen.names.length) {
+    box.append(el('div', { class: 'hint' }, `${fmt(seen.at)}${seen.session ? `（${seen.session} 那一場）` : ''}在購票頁看到的票區，點一下加進關鍵字：`), chipsOf(seen.names));
+    any = true;
+  }
+  const named = priceHints.filter((p) => p && p.name).map((p) => `${p.name} ${p.price}`);
+  if (named.length) {
+    box.append(el('div', { class: 'hint' }, '活動頁的節目介紹寫的票價，點一下加進關鍵字：'), chipsOf(named));
+    any = true;
+  }
+  if (!any && slug) {
+    box.append(el('div', { class: 'hint' }, '這個活動頁沒寫票區名稱。開賣後助手進到選票區頁會記下這場的票區，下次讀取這個活動就會出現在這裡。不確定的話，可以勾進階設定的「關鍵字都比對不到時，改選第一個還能買的票區」。'));
+  }
 }
 
 async function previewUrl() {
@@ -141,6 +241,7 @@ function renderTask(task, now) {
     if (task.phase === 'armed') row('開頁', task.tabId ? '已開好' : fmt(task.openAt));
     if (task.fireDrift != null) row('到點誤差', `${task.fireDrift} ms`);
   }
+  if (task.failedAreas && task.failedAreas.length) row('售完跳過', task.failedAreas.join('、'));
   if (task.notOpen || task.fail || task.loadFail) row('重試', `尚未開賣 ${task.notOpen} 次、頁面載入失敗 ${task.loadFail || 0} 次、被拒絕 ${task.fail} 次`);
   if (task.result) {
     const took = task.result.elapsedMs != null ? `（${(task.result.elapsedMs / 1000).toFixed(1)} 秒）` : '';
@@ -203,14 +304,12 @@ $('btnRead').addEventListener('click', async () => {
   out.textContent = r.msg || r.error || '讀取失敗';
   out.className = 'hint ' + (r.ok ? 'good' : 'bad');
   if (Array.isArray(r.sessions) && r.sessions.length) {
-    fillSessions(r.sessions.map((x) => ({ when: x.when, name: x.name })), $('sessionWhen').value);
-    if (r.saleAt && !$('openTime').value) $('openTime').value = r.saleAt;
-    if (r.saleAt && r.saleAt !== $('openTime').value) {
-      // 開賣時間跟你原本填的不同：照活動頁讀到的更新，提醒一下
-      out.textContent += `（開賣時間已更新成 ${r.saleAt.replace('T', ' ')}）`;
-      $('openTime').value = r.saleAt;
-    }
+    fillSessions(r.sessions.map((x) => ({ when: x.when, name: x.name, saleStart: x.saleStart || null })), $('sessionWhen').value);
+    eventSaleTimes = Array.isArray(r.saleTimes) ? r.saleTimes : [];
+    priceHints = Array.isArray(r.prices) ? r.prices.map((p) => ({ name: String(p.name || ''), price: Number(p.price) || 0 })) : [];
+    applySaleTime();
     saveSoon();
+    renderKeywordHints();
   }
   btn.disabled = false;
   refresh();
@@ -261,11 +360,13 @@ $('btnClearLogs').addEventListener('click', async () => {
 });
 
 for (const id of ['eventUrl', 'sessionWhen', 'keywords', 'qty', 'openTime', 'preOpenSec',
-  'notOpenRetryMs', 'notOpenMaxRetries', 'failMaxRetries', 'syncClock', 'autoAgree', 'exclude', 'fallback']) {
+  'notOpenRetryMs', 'notOpenMaxRetries', 'failMaxRetries', 'syncClock', 'autoAgree', 'allowNonAdjacent', 'exclude', 'fallback']) {
   $(id).addEventListener('input', saveSoon);
   $(id).addEventListener('change', saveSoon);
 }
-$('eventUrl').addEventListener('input', previewUrl);
+$('eventUrl').addEventListener('input', () => { previewUrl(); renderKeywordHints(); });
+$('sessionWhen').addEventListener('change', () => { applySaleTime(); saveSoon(); });
+$('exclude').addEventListener('change', renderKeywordHints);
 
 /** 擴充功能資料夾裡有 preset.json 時，第一次打開（還沒存過設定）就先帶入，給預先設定好的安裝用 */
 async function loadPreset() {
@@ -287,6 +388,7 @@ async function loadPreset() {
   }
   fillForm(form);
   previewUrl();
+  renderKeywordHints();
   refresh();
   setInterval(refresh, 1000);
 })();

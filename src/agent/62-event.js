@@ -31,11 +31,9 @@
     if (!btn || st.status !== 'on-sale') {
       return retry('not-open', `場次「${sessionKey(cfg.sessionWhen)}」還不能買（按鈕：${info.button || '沒有'}${info.disabled ? '，灰的' : ''}）`);
     }
-    const before = state.alerts.length;
     log(`場次「${sessionKey(cfg.sessionWhen)}」可以買了，按下「${info.button}」`);
     setStatus('按下線上購票…', 'ok');
-    pageClick(btn);
-    const out = await watchAfterClick(before, 20000, '正在進入購票流程');
+    const out = await clickAndWatch(btn, 20000, '正在進入購票流程');
     if (out.kind === 'alert') return handleAlert(out, '按下線上購票');
     if (out.kind === 'timeout') return retry('fail', '按下線上購票後 20 秒頁面沒有反應');
     return undefined;

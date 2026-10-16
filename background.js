@@ -45,6 +45,7 @@ const DEFAULTS = {
   failMaxRetries: 3,
   syncClock: true,
   autoAgree: true,         // 填購票資訊頁自動勾「同意」
+  allowNonAdjacent: false, // 座位/數量頁有「接受不連號座位」時要不要勾（tickets_hunter 也有這個選項）
   // 名稱含這些字的票區一律不選（同 kktix 助手）：身障席位保留給需要的人，視線不良的位置也避開
   exclude: DEFAULT_EXCLUDE.slice(),
   fallback: false,         // 關鍵字都比對不到時，要不要改選第一個還能買的（一樣套用排除字）
@@ -100,6 +101,7 @@ function normalizeCfg(raw) {
     // 沒傳就用預設；傳了空字串代表你刻意清空，就照你的意思不排除
     exclude: r.exclude === undefined ? DEFAULTS.exclude.slice() : parseList(r.exclude),
     fallback: r.fallback === true,
+    allowNonAdjacent: r.allowNonAdjacent === true,
   };
   cfg.regUrl = activityUrl(cfg.eventUrl);
   return cfg;
@@ -145,6 +147,7 @@ function newTask(cfg, mode, extra) {
     targetTs: null, openAt: null, tabId: null, windowId: null,
     phase: mode === 'scheduled' ? 'armed' : 'running',
     notOpen: 0, fail: 0, loadFail: 0, loadStreak: 0, loadFailSince: null, lastNetFail: null, createdAt: Date.now(), startedAt: null, firedAt: null, fireDrift: null,
+    failedAreas: [], areaUrl: null,   // 這次售完過的票區、選區頁的網址（售完時回這一頁換別區）
     result: null, warned: {},
     ...extra,
   };
@@ -357,8 +360,10 @@ function onHello(tabId, page, opener) {
     if (FLOW_KINDS.includes(kind)) {
       // 購票流程的頁面：開賣後（含你處理完驗證碼、進到下一頁）助手接著動作
       if (!FLOW_PHASES.includes(t.phase)) return { mode: 'idle' };
-      if (t.phase === 'waiting-user') await set({ task: { ...t, phase: 'running' } });
-      return { mode: 'run', cfg: t.cfg, since: t.firedAt || t.startedAt, notOpen: t.notOpen, fail: t.fail, loadFail: 0 };
+      const next = { ...t, phase: t.phase === 'waiting-user' ? 'running' : t.phase, areaUrl: kind === 'area' ? page.url : t.areaUrl };
+      if (next.phase !== t.phase || next.areaUrl !== t.areaUrl) await set({ task: next });
+      return { mode: 'run', cfg: t.cfg, since: t.firedAt || t.startedAt, notOpen: t.notOpen, fail: t.fail, loadFail: 0,
+        failedAreas: next.failedAreas || [], areaUrl: next.areaUrl || null };
     }
     return { mode: 'idle' };
   });
@@ -573,7 +578,7 @@ async function onOffTrack(tabId, kind, url) {
     else await onResult(tabId, { ok: false, kind: 'card-validate', url, handOff: true, msg });
     return;
   }
-  await recoverTab(tabId, 'ibon 回了錯誤頁', 'navigate');
+  await recoverTab(tabId, kind === 'home' ? 'ibon 把頁面導回首頁' : 'ibon 回了錯誤頁', 'navigate');
 }
 
 /** 問頁面上的助手還在不在：活動頁是單頁應用，網址或載入狀態會變但頁面沒有真的重新載入，助手不會再報到一次 */
@@ -617,7 +622,8 @@ chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
 /* ───────────────────────── 訊息入口 ───────────────────────── */
 
 const POPUP_TYPES = new Set(['schedule', 'run-now', 'cancel', 'status', 'clear-logs', 'preview-url', 'check-event', 'health-check']);
-const PAGE_TYPES = new Set(['hello', 'fired', 'fired-drift', 'retry', 'result', 'log', 'warn', 'abort-request', 'check-result', 'net-fail', 'load-ok', 'clock', 'health-result', 'health', 'blackbox']);
+const PAGE_TYPES = new Set(['hello', 'fired', 'fired-drift', 'retry', 'result', 'log', 'warn', 'abort-request', 'check-result', 'load-ok', 'clock', 'health-result', 'health', 'blackbox', 'area-failed', 'areas-seen']);
+const AREA_SEEN_EVENTS = 30;   // 記幾個活動的票區名稱（給彈出視窗當關鍵字參考）
 
 async function handle(msg, sender) {
   const type = msg && msg.type;
@@ -679,6 +685,34 @@ async function handle(msg, sender) {
         return { ok: true };
       }
       case 'check-result': return { ok: finishCheck(tabId, p) };
+      case 'area-failed': {
+        // 這個票區賣完了：記在任務裡，回到選區頁時跳過
+        const text = String(p.text || '').replace(/\s+/g, ' ').trim().slice(0, 60);
+        if (!text) return { ok: false };
+        const ok = await serial(async () => {
+          const t = await getTask();
+          if (!t || t.tabId !== tabId) return false;
+          const list = t.failedAreas || [];
+          if (!list.includes(text) && list.length < 20) await set({ task: { ...t, failedAreas: [...list, text] } });
+          return true;
+        });
+        if (ok) addLog(`票區「${text}」賣完了，之後跳過它`, 'warn');
+        return { ok };
+      }
+      case 'areas-seen': {
+        // 頁面上看到的票區名稱：照活動記下來，彈出視窗讀取這個活動時當成關鍵字的參考（不影響任何動作）
+        const t = await getTask();
+        if (!t || t.tabId !== tabId || !t.slug) return { ok: false };
+        const names = [...new Set((Array.isArray(p.names) ? p.names : []).map((x) => String(x).replace(/\s+/g, ' ').trim().slice(0, 60)).filter(Boolean))].slice(0, 40);
+        if (!names.length) return { ok: false };
+        await serial(async () => {
+          const { areaSeen = {} } = await get('areaSeen');
+          areaSeen[t.slug] = { at: Date.now(), session: (t.cfg && t.cfg.sessionWhen) || '', names };
+          const keep = Object.entries(areaSeen).sort((a, b) => b[1].at - a[1].at).slice(0, AREA_SEEN_EVENTS);
+          await set({ areaSeen: Object.fromEntries(keep) });
+        });
+        return { ok: true };
+      }
       case 'blackbox': {
         const t = await getTask();
         if (!(t && t.tabId === tabId) && !pendingChecks.has(tabId)) return { ok: false };

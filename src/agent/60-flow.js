@@ -114,10 +114,47 @@
     return !challengeText();
   }
 
-  /** alert 的結果：登入問題交給你，其他算被拒絕，照額度重試 */
-  async function handleAlert(out, label) {
+  /**
+   * 按下去並等結果。等的這段時間請 alert-hook.js 接管對話框：alert 不跳出來（不然頁面會停住、要你按確定），
+   * 照 kktix 助手「只在等結果的那幾秒接管」的做法，等完就交還。換頁成功時這個頁面已經卸載，新頁面一開始就不接管。
+   */
+  async function clickAndWatch(el, maxMs, label) {
+    const before = state.alerts.length;
+    window.postMessage({ __ith: 'catch', ms: maxMs + 2000 }, location.origin);
+    pageClick(el);
+    try {
+      return await watchAfterClick(before, maxMs, label);
+    } finally {
+      window.postMessage({ __ith: 'catch', ms: 0 }, location.origin);
+    }
+  }
+
+  /* 售完的票區：記在背景程式的任務裡，回到選區頁時跳過，改選下一個（tickets_hunter 也是售完就回選區頁換別區）。 */
+  const SOLD_OUT_MSG = /已售完|售完|選購一空|尚無票|額滿|已無票|No tickets available|Sold out/i;
+
+  /** 這個票區是不是之前售完過：記的可能是「1F 鐵粉席 1,000」或只有「鐵粉席」，互相包含就算 */
+  function isFailedArea(name, failed) {
+    const n = norm(name);
+    return !!n && (failed || []).some((f) => { const x = norm(f); return !!x && (x.includes(n) || n.includes(x)); });
+  }
+
+  async function markAreaFailed(text) {
+    if (!text) return;
+    log(`票區「${text}」賣完了，之後跳過它`, 'warn');
+    await call('area-failed', { text }, 1500);
+  }
+
+  /**
+   * alert 的結果：登入問題交給你；說售完而且知道是哪個票區 → 記下來，回選區頁（或重新整理這頁）換下一個；
+   * 其他算被拒絕，照額度重試。opts：{ areaText 這次選的票區, areaUrl 選區頁網址（在座位/數量頁才有） }
+   */
+  async function handleAlert(out, label, opts = {}) {
     if (/登入|sign in|log in/i.test(out.msg)) return finish(false, 'guest', `ibon 要求登入：「${out.msg}」`, { handOff: true });
     blackbox('rejected', `ibon 回覆「${out.msg}」`);
+    if (SOLD_OUT_MSG.test(out.msg) && opts.areaText) {
+      await markAreaFailed(opts.areaText);
+      return retry('fail', `${label}時 ibon 回覆「${out.msg}」，換別的票區`, opts.areaUrl);
+    }
     return retry('fail', `${label}時 ibon 回覆「${out.msg}」`);
   }
 
@@ -135,8 +172,8 @@
       const kind = pageKind();
       if (kind === 'event') await runEvent(cfg, d);
       else if (kind === 'verify') await runVerify(cfg);
-      else if (kind === 'area') await runArea(cfg);
-      else if (kind === 'qty') await runQty(cfg);
+      else if (kind === 'area') await runArea(cfg, d);
+      else if (kind === 'qty') await runQty(cfg, d);
       else if (kind === 'buyer') await runBuyer(cfg);
     } catch (e) {
       await finish(false, 'error', '程式錯誤：' + (e && e.message ? e.message : e));
