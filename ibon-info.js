@@ -251,6 +251,7 @@
    *   activity        活動頁 ticket.ibon.com.tw/ActivityInfo/Details/<數字>（已驗證）
    *   go-ticket       活動頁「線上購票」的轉址 /ActivityInfo/GoTicketURL（已驗證：真站資料裡的連結）
    *   purchase-entry  購票流程入口 orders.ibon.com.tw/application/UTK02/UTK0201_000.aspx（網址已驗證；頁面結構還沒看過）
+   *   buyer-info      填寫購票資訊（流程第 4 步）orders.ibon.com.tw/application/UTK02/UTK0206_.aspx（2026-10-16 真站快照核對過）
    *   purchase        購票流程的其他頁 orders.ibon.com.tw/application/UTK02/…（推測）
    *   ticket-other、orders-other  同網域的其他頁
    */
@@ -265,6 +266,7 @@
     }
     if (u.hostname === 'orders.ibon.com.tw') {
       if (/^\/application\/UTK02\/UTK0201_000\.aspx$/i.test(u.pathname)) return 'purchase-entry';
+      if (/^\/application\/UTK02\/UTK0206_\.aspx$/i.test(u.pathname)) return 'buyer-info';
       if (/^\/application\/UTK02\//i.test(u.pathname)) return 'purchase';
       return 'orders-other';
     }
@@ -278,6 +280,7 @@
     activity: { label: '活動頁', verified: true },
     'go-ticket': { label: '線上購票轉址', verified: true },
     'purchase-entry': { label: '購票流程入口（UTK0201）', verified: false },
+    'buyer-info': { label: '填寫購票資訊（UTK0206，第 4 步）', verified: true },
     purchase: { label: '購票流程的其他頁', verified: false },
     'ticket-other': { label: 'ibon 售票網的其他頁', verified: false },
     'orders-other': { label: 'ibon 訂購網域的其他頁', verified: false },
@@ -457,6 +460,81 @@
   function stateHints(text) {
     const t = String(text || '');
     return STATE_HINTS.filter(([, re]) => re.test(t)).map(([state, re, msg]) => ({ state, msg, evidence: ibNorm((t.match(re) || [''])[0]).slice(0, 20), verified: false }));
+  }
+
+
+  /* ───────────────────────── 填寫購票資訊（UTK0206，流程第 4 步） ─────────────────────────
+   * 結構照 2026-10-16 的真站快照（一次、一個活動、全票 1 張、信用卡與 ibon 紙票）：
+   *   上方步驟列 1 選擇活動/商品 → 2 選擇票區 → 3 座位/數量 → 4 填寫購票資訊 → 5 購票確認 → 6 訂票完成
+   *   訂單表格的欄位用 data-title 標：名稱、活動時間、場地、區域/座位、票種（下拉，選項如「全票-NT$5,800」）、數量、價格(NT$)
+   *   「總計(付款金額)」、保留倒數「剩餘時間 mm:ss」、訂購人基本資料（聯絡電話欄、電子郵件只顯示）、付款方式、取票方式、同意退票代辦的勾選框、
+   *   按鈕「取消」「繼續選購」「下一步，核對資料」。這一頁沒看到驗證碼。
+   * 頁面程式（src/info/20-adapter.js 的 readBuyerInfo）只把看到的字交過來；這裡整理成欄位。不收電話、Email 的內容，只收有沒有填。
+   */
+  const ibMoney = (v) => {
+    const m = String(v == null ? '' : v).replace(/[,，\s]/g, '').match(/\d+/);
+    return m ? Number(m[0]) : null;
+  };
+
+  /** 票種下拉的選項「全票-NT$5,800」→ { name: '全票', price: 5800 }；認不得回 null */
+  function parseTicketOption(text) {
+    const m = ibNorm(text).match(/^(.+?)\s*[-－–]\s*NT\$\s*([\d,]+)$/);
+    return m ? { name: m[1].trim(), price: ibMoney(m[2]) } : null;
+  }
+
+  /**
+   * raw: { steps: [{ n, text, active }], title, rows: [{ name, time, venue, seat, type, qty, price }], total, countdown,
+   *        discount, phoneFilled, emailShown, pay: [{ label, checked }], get: [{ label, checked }], agree, buttons: [字], captchaText }
+   * 回整理好的內容；讀不到的項目是 null（不猜）。
+   */
+  function parseBuyerInfo(raw) {
+    const r = raw || {};
+    const steps = Array.isArray(r.steps) ? r.steps : [];
+    const active = steps.find((s) => s && s.active);
+    const rows = (Array.isArray(r.rows) ? r.rows : []).map((x) => {
+      const t = parseTicketOption(x.type);
+      const qty = Number.parseInt(String(x.qty == null ? '' : x.qty).trim(), 10);
+      return {
+        name: ibNorm(x.name) || null, time: ibNorm(x.time) || null, venue: ibNorm(x.venue) || null, seat: ibNorm(x.seat) || null,
+        ticketType: t ? t.name : (ibNorm(x.type) || null), unitPrice: t ? t.price : null,
+        qty: Number.isInteger(qty) && qty > 0 ? qty : null, price: ibMoney(x.price),
+      };
+    });
+    const cd = String(r.countdown || '').match(/(\d{1,2}):(\d{2})/);
+    const picked = (list) => {
+      const l = Array.isArray(list) ? list : [];
+      if (!l.length) return null;
+      const c = l.find((x) => x && x.checked);
+      const short = (t) => (ibNorm(t).replace(/\s*[（(].*$/, '') || ibNorm(t)).slice(0, 40);   // 「信用卡(可使用VISA…)」→「信用卡」
+      return { options: l.map((x) => short(x.label)), chosen: c ? short(c.label) : null };
+    };
+    const buttons = (Array.isArray(r.buttons) ? r.buttons : []).map(ibNorm).filter(Boolean);
+    return {
+      step: active ? { n: Number(active.n) || null, text: ibNorm(active.text) } : null,
+      title: ibNorm(r.title) || null,
+      rows,
+      total: ibMoney(r.total),
+      holdLeft: cd ? { text: `${cd[1].padStart(2, '0')}:${cd[2]}`, seconds: Number(cd[1]) * 60 + Number(cd[2]) } : null,
+      discount: ibNorm(r.discount) || null,
+      phoneFilled: typeof r.phoneFilled === 'boolean' ? r.phoneFilled : null,
+      emailShown: typeof r.emailShown === 'boolean' ? r.emailShown : null,
+      pay: picked(r.pay), get: picked(r.get),
+      agree: typeof r.agree === 'boolean' ? r.agree : null,
+      next: buttons.find((b) => /下一步/.test(b)) || null,
+      captcha: r.captchaText ? ibNorm(r.captchaText).slice(0, 20) : null,
+    };
+  }
+
+  /** 「2026/11/14 15:30」跟活動頁場次文字「2026/11/14(六) 15:30 …」是不是同一個時間；有一邊看不出日期時間就回 null（不猜） */
+  function sameSessionTime(a, b) {
+    const key = (s) => {
+      const t = String(s || '');
+      const d = t.match(/(\d{4})\s*[/.-]\s*(\d{1,2})\s*[/.-]\s*(\d{1,2})/);
+      const h = t.match(/(\d{1,2}):(\d{2})/);
+      return d && h ? `${d[1]}-${d[2].padStart(2, '0')}-${d[3].padStart(2, '0')} ${h[1].padStart(2, '0')}:${h[2]}` : null;
+    };
+    const x = key(a), y = key(b);
+    return x && y ? x === y : null;
   }
 
   /* ───────────────────────── 語意定位 ─────────────────────────
@@ -691,6 +769,66 @@
     };
   }
 
+  /**
+   * 填寫購票資訊（UTK0206，流程第 4 步）：照 2026-10-16 的真站快照讀，只讀看得到的字，整理交給 lib/ibon.js 的 parseBuyerInfo。
+   * 用頁面上的字與 data-title 找位置，不靠 ASP.NET 產生的 id。聯絡電話、Email 只回「有沒有」，不讀內容。
+   */
+  function readBuyerInfo() {
+    const vis = (el) => isVisible(el);
+    const cardBody = (title) => {
+      const h = $$('.card-header, h5').find((el) => norm(el.textContent) === title);
+      return h ? (h.closest('.card') || h.parentElement) : null;
+    };
+    const radios = (root) => (root ? $$('input[type=radio]', root) : []).map((r) => {
+      const lab = r.id ? root.querySelector(`label[for="${CSS.escape(r.id)}"]`) : null;
+      return { label: norm((lab || r.parentElement || {}).textContent || ''), checked: r.checked };
+    }).filter((x) => x.label);
+    const steps = $$('.step-grid').map((g) => ({
+      n: norm(($('.step-circle', g) || {}).textContent || ''), text: norm(($('.text', g) || {}).textContent || ''), active: g.classList.contains('active'),
+    }));
+    const table = $$('table').find((t) => $$('th', t).some((th) => norm(th.textContent) === '區域/座位'));
+    const cell = (tr, title) => {
+      const td = $$('td', tr).find((c) => norm(c.getAttribute('data-title')) === title);
+      if (!td) return null;
+      const sel = $('select', td);
+      if (sel) return norm((sel.selectedOptions[0] || {}).textContent || '');
+      const shown = $$('span', td).filter(vis);
+      return norm(shown.length ? shown.map((x) => x.textContent).join(' ') : td.textContent);
+    };
+    const rows = table ? $$('tbody tr', table).filter((tr) => $$('td[data-title]', tr).length).map((tr) => ({
+      name: cell(tr, '名稱'), time: cell(tr, '活動時間'), venue: cell(tr, '場地'), seat: cell(tr, '區域/座位'),
+      type: cell(tr, '票種'), qty: cell(tr, '數量'), price: cell(tr, '價格(NT$)'),
+    })) : [];
+    const totalLabel = $$('div').find((el) => norm(el.textContent) === '總計(付款金額)');
+    const totalEl = totalLabel && totalLabel.parentElement ? $('.total', totalLabel.parentElement) : null;
+    const countdown = $$('span').filter(vis).map((el) => norm(el.textContent)).find((t) => /^剩餘時間\s*\d{1,2}:\d{2}$/.test(t)) || null;
+    const field = (labelText) => {
+      const lab = $$('label').find((l) => norm(l.textContent).replace(/^\*/, '') === labelText);
+      return lab ? (lab.closest('.form-group') || lab.parentElement) : null;
+    };
+    const phoneBox = field('聯絡電話：');
+    const phoneInput = phoneBox ? $('input', phoneBox) : null;
+    const emailBox = field('電子郵件：');
+    const emailShown = emailBox ? !!norm(($('.col-sm-10', emailBox) || emailBox).textContent).replace('電子郵件：', '') : null;
+    const agreeBox = $$('input[type=checkbox]').find((c) => {
+      const l = c.id ? $(`label[for="${CSS.escape(c.id)}"]`) : null;
+      return l && /同意/.test(l.textContent);
+    });
+    const discount = cardBody('請選擇折扣');
+    const text = visibleText();
+    const cap = text.match(/驗證碼|請輸入圖形|圖形驗證/);
+    return {
+      steps, title: norm(($('#order-wrap h1') || {}).textContent || '') || null, rows,
+      total: totalEl ? norm(totalEl.textContent) : null, countdown,
+      discount: discount ? norm(($('.card-body', discount) || discount).textContent) : null,
+      phoneFilled: phoneInput ? norm(phoneInput.value) !== '' : null, emailShown,
+      pay: radios(cardBody('選擇付款方式')), get: radios(cardBody('取票方式')),
+      agree: agreeBox ? agreeBox.checked : null,
+      buttons: deepAll('a, button, input[type=submit]').filter(vis).map((b) => norm(b.textContent || b.value)).filter((t) => t && t.length <= 12),
+      captchaText: cap ? cap[0] : null,
+    };
+  }
+
   const IbonAdapter = {
     id: 'ibon',
 
@@ -703,6 +841,9 @@
     /** 登入狀態：頁首看得到「快速登入」＝沒登入（真站看過）；看不到就說看不出來（登入後的頁首還沒在真站核對過） */
     loginState() {
       const link = deepAll('a, button').find((el) => norm(el.textContent) === '快速登入' && isVisible(el));
+      if (!link && IbonAdapter.pageKind() === 'buyer-info' && deepAll('a, button').some((el) => norm(el.textContent) === '登出' && isVisible(el))) {
+        return { state: 'logged-in', verified: true, msg: '頁首有「登出」：已經登入（購票流程頁，2026-10-16 真站快照看過）' };
+      }
       return link
         ? { state: 'logged-out', verified: true, msg: '頁首有「快速登入」：目前沒有登入。購票前請先登入（購票須知也這樣要求）' }
         : { state: 'unknown', verified: false, msg: '頁首沒看到「快速登入」，可能已經登入（登入後的頁首還沒在真站核對過）' };
@@ -718,6 +859,9 @@
       const hints = kind === 'activity' ? [] : stateHints(visibleText());
       return { kind, label: page.label, verified: page.verified, login: IbonAdapter.loginState(), hints, policy: IBON_POLICY };
     },
+
+    /** 填寫購票資訊（UTK0206）：訂單內容、保留時間、要你自己填選的項目（只讀） */
+    readBuyerInfo: () => parseBuyerInfo(readBuyerInfo()),
 
     /** 這一頁助手能做什麼、要你自己做什麼（lib/ibon.js 的 IBON_POLICY） */
     supportedActions: () => IBON_POLICY,
@@ -744,6 +888,7 @@
       const r = await readAndBuild();
       return r.ok ? { ok: true, kind, info: r.info } : { ok: false, kind, error: r.error };
     }
+    if (kind === 'buyer-info') return { ok: true, kind, state: IbonAdapter.readState(), detail: IbonAdapter.readBuyerInfo() };
     return { ok: true, kind, state: IbonAdapter.readState() };
   }
 

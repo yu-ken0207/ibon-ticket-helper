@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+<head>
+<meta charset="utf-8">
+<title>[測試用] 填寫購票資訊樣本</title>
+</head>
+<body>
+<!--
+  端對端測試用的「填寫購票資訊（UTK0206，第 4 步）」樣本。
+  結構照 2026-10-16 的真站結構快照（步驟列、data-title 的訂單表格、總計、剩餘時間、訂購人基本資料、付款與取票方式、同意勾選、按鈕），
+  內容全部虛構（活動、場地、座位、價格、電話、Email），不是任何官方網站，也不會被部署。
+  電話欄預先填了假號碼、Email 顯示假信箱：測試確認助手只回「有沒有」，沒把內容帶出去。
+  任何按鈕或連結被點到就打一個 /__clicked 請求。
+-->
+<p style="background:#fde68a;padding:6px">測試用頁面：結構照真站快照，內容是虛構的，不是任何官方網站。</p>
+<header>
+  <a id="HuiwanEdit" href="#">會員中心</a>
+  <a id="Huiwanlogout" href="#">登出</a>
+</header>
+<div id="clockdown">
+  <span><i class="fas fa-clock"></i></span>
+  <span id="countdown">剩餘時間07:45</span>
+</div>
+<section id="content"><div class="container"><div id="ticket-wrap">
+  <div class="step-wrap">
+    <div class="step-grid"><span class="step-circle">1</span><span class="text">選擇活動/商品</span></div>
+    <div class="step-grid"><span class="step-circle">2</span><span class="text">選擇票區</span></div>
+    <div class="step-grid"><span class="step-circle">3</span><span class="text">座位/數量</span></div>
+    <div class="step-grid active"><span class="step-circle">4</span><span class="text">填寫購票資訊</span></div>
+    <div class="step-grid"><span class="step-circle">5</span><span class="text">購票確認</span></div>
+    <div class="step-grid"><span class="step-circle">6</span><span class="text">訂票完成</span></div>
+  </div>
+  <div id="order-wrap">
+    <h1 class="title"><span>示範音樂會（測試）</span></h1>
+    <div class="ticket-order-detail">
+      <table class="table rwdtable">
+        <thead><tr><th>名稱</th><th>活動時間</th><th>場地</th><th>區域/座位</th><th>票種</th><th>數量</th><th>價格(NT$)</th><th></th></tr></thead>
+        <tbody><tr>
+          <td data-title="名稱"><span>示範音樂會（測試）</span></td>
+          <td data-title="活動時間">2026/12/05 18:00</td>
+          <td data-title="場地"><span>示範展演廳</span></td>
+          <td data-title="區域/座位"><span>2樓看台_3排-12號、2樓看台_3排-13號</span></td>
+          <td data-title="票種"><select class="form-control"><option selected>全票-NT$150</option></select></td>
+          <td data-title="數量"><span>2</span></td>
+          <td data-title="價格(NT$)"><span style="display:none">300</span><span>300</span></td>
+          <td data-title="移除"><button type="button" class="btn btn-del clk">×</button></td>
+        </tr></tbody>
+      </table>
+      <div class="fixed-box"><div class="total-box"><div>總計(付款金額)</div><div class="total">$300</div></div></div>
+    </div>
+    <div class="card"><h5 class="card-header">請選擇折扣</h5><div class="card-body"><div class="color-red">本場次票區無折扣優惠</div></div></div>
+    <div class="card"><h5 class="card-header">訂購人基本資料</h5><div class="card-body">
+      <div class="form-group row"><label class="col-sm-2">*聯絡電話：</label><div class="col-sm-10"><input id="phone" class="form-control" type="text" value="0911222333"></div></div>
+      <div class="form-group row"><label class="col-sm-2">*電子郵件：</label><div class="col-sm-10"><div class="form-control">demo-buyer@example.com</div></div></div>
+    </div></div>
+    <div class="card"><h5 class="card-header">選擇付款方式</h5><div class="card-body">
+      <div class="custom-radio"><input id="payCard" type="radio" name="pay" value="card" checked><label for="payCard">信用卡</label></div>
+      <div class="custom-radio"><input id="payAtm" type="radio" name="pay" value="atm"><label for="payAtm">ATM 轉帳</label></div>
+    </div></div>
+    <div class="card"><h5 class="card-header">取票方式</h5><div class="card-body">
+      <div class="custom-radio"><input id="getPaper" type="radio" name="get" value="paper" checked><label for="getPaper">ibon紙票</label></div>
+    </div></div>
+    <div class="card"><h5 class="card-header">網路服務提供契約</h5><div class="card-body">
+      <p>（虛構的契約說明）</p>
+      <input id="agreen" type="checkbox"><label for="agreen">我已詳細閱讀並同意（測試用說明）</label>
+    </div></div>
+    <div class="text-center">
+      <button type="button" class="clk">取消</button>
+      <button type="button" class="clk">繼續選購</button>
+      <a href="#" id="nextLink" class="clk">下一步，核對資料</a>
+    </div>
+  </div>
+</div></div></section>
+<script>
+  const clicked = (e) => { e.preventDefault(); fetch('/__clicked', { method: 'POST' }); };
+  for (const b of document.querySelectorAll('.clk, header a')) b.addEventListener('click', clicked);
+</script>
+</body>
+</html>

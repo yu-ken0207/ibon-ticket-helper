@@ -35,7 +35,7 @@ import { sanitizeInfo } from './lib/eventinfo.js';
 import { ibonPageKind, isIbonPage, IBON_PAGE_INFO, IBON_POLICY, validateEventInfo, matchIbonPrefs, leakCheck } from './lib/ibon.js';
 import { STATES, newWorkflow, transition, stateOfResult, composeHandoff } from './lib/workflow.js';
 import { policyDecision } from './lib/policy.js';
-import { guideActivity, guidePurchase, guideOther } from './lib/guide.js';
+import { guideActivity, guidePurchase, guideBuyerInfo, guideOther } from './lib/guide.js';
 
 const ALARM_OPEN = 'ith-open';
 const ALARM_WATCH = 'ith-watch';
@@ -487,11 +487,34 @@ async function startGuide(raw) {
 /** 頁面讀到的狀態（購票頁）只留認得的欄位 */
 const cleanState = (x) => ({
   kind: str(x.kind, 20), label: str(x.label, 40), verified: x.verified === true,
-  login: x.login ? { state: x.login.state === 'logged-out' ? 'logged-out' : 'unknown', msg: str(x.login.msg, 120) } : null,
+  login: x.login ? { state: ['logged-out', 'logged-in'].includes(x.login.state) ? x.login.state : 'unknown', msg: str(x.login.msg, 120) } : null,
   hints: arr(x.hints, 10).map((h) => ({ state: str(h.state, 20), msg: str(h.msg, 80), evidence: str(h.evidence, 20) })),
 });
 
-const GUIDE_STATES = { activity: ['ACTIVITY_READ', 'REQUIREMENT_CHECK', 'SESSION_SELECTION'], 'purchase-entry': ['TICKET_AREA_SELECTION'], purchase: ['TICKET_AREA_SELECTION'] };
+/** 填寫購票資訊頁讀到的內容（頁面程式交來的，照欄位重新整理、限制長度；本來就沒有電話、Email 的內容） */
+const bNum = (v) => (Number.isFinite(v) && v >= 0 && v < 1e8 ? v : null);
+const bFlag = (v) => (typeof v === 'boolean' ? v : null);
+const bPick = (p) => (p && typeof p === 'object' ? { options: arr(p.options, 10).map((o) => str(o, 40)), chosen: p.chosen == null ? null : str(p.chosen, 40) } : null);
+const cleanBuyer = (d) => {
+  const x = d && typeof d === 'object' ? d : {};
+  return {
+    step: x.step ? { n: bNum(x.step.n), text: str(x.step.text, 20) } : null,
+    title: x.title == null ? null : str(x.title, 120),
+    rows: arr(x.rows, 10).map((r) => ({
+      name: r.name == null ? null : str(r.name, 120), time: r.time == null ? null : str(r.time, 40), venue: r.venue == null ? null : str(r.venue, 60),
+      seat: r.seat == null ? null : str(r.seat, 60), ticketType: r.ticketType == null ? null : str(r.ticketType, 40),
+      unitPrice: bNum(r.unitPrice), qty: bNum(r.qty), price: bNum(r.price),
+    })),
+    total: bNum(x.total),
+    holdLeft: x.holdLeft ? { text: str(x.holdLeft.text, 8), seconds: bNum(x.holdLeft.seconds) } : null,
+    discount: x.discount == null ? null : str(x.discount, 60),
+    phoneFilled: bFlag(x.phoneFilled), emailShown: bFlag(x.emailShown),
+    pay: bPick(x.pay), get: bPick(x.get), agree: bFlag(x.agree),
+    next: x.next == null ? null : str(x.next, 20), captcha: x.captcha == null ? null : str(x.captcha, 20),
+  };
+};
+
+const GUIDE_STATES = { activity: ['ACTIVITY_READ', 'REQUIREMENT_CHECK', 'SESSION_SELECTION'], 'purchase-entry': ['TICKET_AREA_SELECTION'], purchase: ['TICKET_AREA_SELECTION'], 'buyer-info': ['BUYER_INFO'] };
 
 /** 每次頁面載入（或剛開始）讀到的內容 → 建議、判斷依據、各欄位讀取結果、核對上一步 */
 function onGuideReport(tabId, p) {
@@ -501,6 +524,7 @@ function onGuideReport(tabId, p) {
     const kind = str(p.kind, 20);
     let g;
     if (kind === 'activity' && p.info) g = guideActivity(sanitizeInfo(p.info), t.cfg);
+    else if (kind === 'buyer-info' && p.detail) g = guideBuyerInfo(cleanBuyer(p.detail), t.guide, t.cfg);
     else if ((kind === 'purchase-entry' || kind === 'purchase') && p.state) g = guidePurchase(cleanState(p.state), t.guide);
     else g = guideOther(kind);
     let wf = transition(t.wf, 'PAGE_DETECTION', { reason: `人工操作模式：${g.label}`, force: true }).wf;

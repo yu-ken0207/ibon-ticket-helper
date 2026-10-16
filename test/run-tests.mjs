@@ -44,6 +44,8 @@ const IBON_URL = 'https://ticket.ibon.com.tw/ActivityInfo/Details/990001';
 // 購票流程頁的樣本（虛構，結構是假設的）：網址照真站資料裡的格式
 const IBON_PURCHASE_FIXTURE = fs.readFileSync(path.join(HERE, 'fixtures', 'ibon-purchase.html'), 'utf8');
 const IBON_PURCHASE_URL = 'https://orders.ibon.com.tw/application/UTK02/UTK0201_000.aspx?PERFORMANCE_ID=TEST1&PRODUCT_ID=TEST2';
+const IBON_BUYER_FIXTURE = fs.readFileSync(path.join(HERE, 'fixtures', 'ibon-buyer-info.html'), 'utf8');
+const IBON_BUYER_URL = 'https://orders.ibon.com.tw/application/UTK02/UTK0206_.aspx';
 
 const PROFILE = { name: '測試使用者', phone: '0912-345-678', email: 'tester@example.com', note: '' };
 
@@ -79,7 +81,7 @@ function startIbonFixture() {
     '-subj', '/CN=ticket.ibon.com.tw', '-addext', 'subjectAltName=DNS:ticket.ibon.com.tw,DNS:*.ibon.com.tw'], { stdio: 'ignore' });
   const server = https.createServer({ key: fs.readFileSync(path.join(WORK, 'ibon-key.pem')), cert: fs.readFileSync(path.join(WORK, 'ibon-cert.pem')) }, (req, res) => {
     ibonRequests.push(`${req.method} ${req.url}`);
-    const pages = { [new URL(IBON_URL).pathname]: IBON_FIXTURE, [new URL(IBON_PURCHASE_URL).pathname]: IBON_PURCHASE_FIXTURE };
+    const pages = { [new URL(IBON_URL).pathname]: IBON_FIXTURE, [new URL(IBON_PURCHASE_URL).pathname]: IBON_PURCHASE_FIXTURE, [new URL(IBON_BUYER_URL).pathname]: IBON_BUYER_FIXTURE };
     const body = req.method === 'GET' && pages[req.url.split('?')[0]];
     if (body) {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
@@ -998,7 +1000,7 @@ const SCENARIOS = [
   {
     name: 'ibon-guide',
     once: true,
-    title: 'ibon 人工操作模式（虛構樣本頁）：活動頁給建議與依據；你換到購票頁後核對，購票頁欄位照實標「尚未驗證」；不點任何東西',
+    title: 'ibon 人工操作模式（虛構樣本頁）：活動頁給建議與依據；你換到購票頁後核對，購票頁欄位照實標「尚未驗證」；填寫購票資訊頁照真站結構讀出訂單並核對需求；不點任何東西',
     async run({ ctx, popup }) {
       ibonRequests.length = 0;
       await popup.fill('#eventUrl', IBON_URL);
@@ -1024,6 +1026,14 @@ const SCENARIOS = [
       const f2 = Object.fromEntries((g2.fields || []).map((f) => [f.field, f]));
       await sleep(400);
       const card = await popup.textContent('#taskBox');
+      // 你自己選好票區與張數，到了「填寫購票資訊」（結構照真站快照、內容虛構）
+      await page.goto(IBON_BUYER_URL);
+      const s4 = await waitTask(popup, (t) => !!(t.guide && t.guide.pageKind === 'buyer-info'), 20000);
+      const g4 = s4.task.guide || {};
+      const f4 = Object.fromEntries((g4.fields || []).map((f) => [f.field, f]));
+      const raw4 = JSON.stringify(s4.task);
+      let card4 = '';
+      for (let i = 0; i < 20 && !/填寫購票資訊（UTK0206/.test(card4); i++) { await sleep(250); card4 = await popup.textContent('#taskBox'); }
       const clicked = ibonRequests.filter((x) => /__clicked/.test(x));
       const nonGet = ibonRequests.filter((x) => !x.startsWith('GET '));
       await clickAndRead(popup, '#btnCancel');
@@ -1037,6 +1047,11 @@ const SCENARIOS = [
         ['購票頁欄位一律尚未驗證、不猜；驗證碼只辨識有沒有', ['票區', '價格', '剩餘數量', '張數限制'].every((k) => f2[k] && f2[k].status === 'unverified' && f2[k].value === null) && /^頁面上有「/.test(f2['驗證碼區域'].value) && f2['驗證碼區域'].status === 'unverified', JSON.stringify(f2['驗證碼區域'])],
         ['流程狀態照頁面記（由你操作）', inOrder(wfPath(s2.task), ['ACTIVITY_READ', 'REQUIREMENT_CHECK', 'SESSION_SELECTION', 'PAGE_DETECTION', 'TICKET_AREA_SELECTION']), wfPath(s2.task).join('→')],
         ['設定頁顯示建議與欄位讀取結果', /人工操作模式：第 2 頁/.test(card) && /？ 尚未驗證/.test(card) && /建議：/.test(card), card.slice(0, 80)],
+        ['填寫購票資訊：讀出步驟、場次時間、座位、票種、單價、張數、總計、保留時間', f4['目前步驟'] && f4['目前步驟'].value === '第 4 步：填寫購票資訊' && f4['場次時間'].value === '2026/12/05 18:00' && /2樓看台_3排-12號/.test(f4['票區／座位'].value) && f4['票種'].value === '全票' && f4['單價'].value === 'NT$150' && f4['張數'].value === '2 張' && f4['總計'].value === 'NT$300' && /^0?7:4\d$/.test(f4['保留剩餘時間'].value.replace(/^0/, '')), JSON.stringify(Object.values(f4).map((f) => `${f.field}=${f.value}`))],
+        ['填寫購票資訊：核對場次時間與張數都跟建議／需求一致', g4.verify && g4.verify.status === 'ok' && /場次時間 2026\/12\/05 18:00 跟建議/.test(g4.verify.msg) && /張數 2 張跟需求一致/.test(g4.verify.msg), g4.verify && g4.verify.msg],
+        ['填寫購票資訊：電話只說有填、付款與取票照頁面選的、同意還沒勾；建議由你自己勾選與按下一步', f4['聯絡電話'].value === '已填（助手不讀內容）' && f4['付款方式'].value === '已選「信用卡」' && f4['取票方式'].value === '已選「ibon紙票」' && f4['同意條款'].value === '還沒勾選' && /自己勾選同意/.test(g4.recommendation) && /自己按「下一步，核對資料」/.test(g4.recommendation) && /剩 0?7:4\d/.test(g4.recommendation), g4.recommendation],
+        ['填寫購票資訊：沒有把電話、Email 的內容帶出頁面', !/0911222333|demo-buyer@example\.com/.test(raw4), ''],
+        ['填寫購票資訊：流程狀態到 BUYER_INFO，設定頁顯示', wfPath(s4.task).includes('BUYER_INFO') && /填寫購票資訊（UTK0206/.test(card4), wfPath(s4.task).join('→')],
         ['沒有點任何按鈕、沒有送出任何東西', clicked.length === 0 && nonGet.length === 0, `點擊 ${clicked.length}、非 GET ${nonGet.length}`],
         ['用「取消任務」結束', s3.task.phase === 'cancelled', s3.task.phase],
       ];

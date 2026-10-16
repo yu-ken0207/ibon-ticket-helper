@@ -16,6 +16,7 @@
       const r = await readAndBuild();
       return r.ok ? { ok: true, kind, info: r.info } : { ok: false, kind, error: r.error };
     }
+    if (kind === 'buyer-info') return { ok: true, kind, state: IbonAdapter.readState(), detail: IbonAdapter.readBuyerInfo() };
     return { ok: true, kind, state: IbonAdapter.readState() };
   }
 

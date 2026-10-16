@@ -67,6 +67,66 @@
     };
   }
 
+  /**
+   * 填寫購票資訊（UTK0206，流程第 4 步）：照 2026-10-16 的真站快照讀，只讀看得到的字，整理交給 lib/ibon.js 的 parseBuyerInfo。
+   * 用頁面上的字與 data-title 找位置，不靠 ASP.NET 產生的 id。聯絡電話、Email 只回「有沒有」，不讀內容。
+   */
+  function readBuyerInfo() {
+    const vis = (el) => isVisible(el);
+    const cardBody = (title) => {
+      const h = $$('.card-header, h5').find((el) => norm(el.textContent) === title);
+      return h ? (h.closest('.card') || h.parentElement) : null;
+    };
+    const radios = (root) => (root ? $$('input[type=radio]', root) : []).map((r) => {
+      const lab = r.id ? root.querySelector(`label[for="${CSS.escape(r.id)}"]`) : null;
+      return { label: norm((lab || r.parentElement || {}).textContent || ''), checked: r.checked };
+    }).filter((x) => x.label);
+    const steps = $$('.step-grid').map((g) => ({
+      n: norm(($('.step-circle', g) || {}).textContent || ''), text: norm(($('.text', g) || {}).textContent || ''), active: g.classList.contains('active'),
+    }));
+    const table = $$('table').find((t) => $$('th', t).some((th) => norm(th.textContent) === '區域/座位'));
+    const cell = (tr, title) => {
+      const td = $$('td', tr).find((c) => norm(c.getAttribute('data-title')) === title);
+      if (!td) return null;
+      const sel = $('select', td);
+      if (sel) return norm((sel.selectedOptions[0] || {}).textContent || '');
+      const shown = $$('span', td).filter(vis);
+      return norm(shown.length ? shown.map((x) => x.textContent).join(' ') : td.textContent);
+    };
+    const rows = table ? $$('tbody tr', table).filter((tr) => $$('td[data-title]', tr).length).map((tr) => ({
+      name: cell(tr, '名稱'), time: cell(tr, '活動時間'), venue: cell(tr, '場地'), seat: cell(tr, '區域/座位'),
+      type: cell(tr, '票種'), qty: cell(tr, '數量'), price: cell(tr, '價格(NT$)'),
+    })) : [];
+    const totalLabel = $$('div').find((el) => norm(el.textContent) === '總計(付款金額)');
+    const totalEl = totalLabel && totalLabel.parentElement ? $('.total', totalLabel.parentElement) : null;
+    const countdown = $$('span').filter(vis).map((el) => norm(el.textContent)).find((t) => /^剩餘時間\s*\d{1,2}:\d{2}$/.test(t)) || null;
+    const field = (labelText) => {
+      const lab = $$('label').find((l) => norm(l.textContent).replace(/^\*/, '') === labelText);
+      return lab ? (lab.closest('.form-group') || lab.parentElement) : null;
+    };
+    const phoneBox = field('聯絡電話：');
+    const phoneInput = phoneBox ? $('input', phoneBox) : null;
+    const emailBox = field('電子郵件：');
+    const emailShown = emailBox ? !!norm(($('.col-sm-10', emailBox) || emailBox).textContent).replace('電子郵件：', '') : null;
+    const agreeBox = $$('input[type=checkbox]').find((c) => {
+      const l = c.id ? $(`label[for="${CSS.escape(c.id)}"]`) : null;
+      return l && /同意/.test(l.textContent);
+    });
+    const discount = cardBody('請選擇折扣');
+    const text = visibleText();
+    const cap = text.match(/驗證碼|請輸入圖形|圖形驗證/);
+    return {
+      steps, title: norm(($('#order-wrap h1') || {}).textContent || '') || null, rows,
+      total: totalEl ? norm(totalEl.textContent) : null, countdown,
+      discount: discount ? norm(($('.card-body', discount) || discount).textContent) : null,
+      phoneFilled: phoneInput ? norm(phoneInput.value) !== '' : null, emailShown,
+      pay: radios(cardBody('選擇付款方式')), get: radios(cardBody('取票方式')),
+      agree: agreeBox ? agreeBox.checked : null,
+      buttons: deepAll('a, button, input[type=submit]').filter(vis).map((b) => norm(b.textContent || b.value)).filter((t) => t && t.length <= 12),
+      captchaText: cap ? cap[0] : null,
+    };
+  }
+
   const IbonAdapter = {
     id: 'ibon',
 
@@ -79,6 +139,9 @@
     /** 登入狀態：頁首看得到「快速登入」＝沒登入（真站看過）；看不到就說看不出來（登入後的頁首還沒在真站核對過） */
     loginState() {
       const link = deepAll('a, button').find((el) => norm(el.textContent) === '快速登入' && isVisible(el));
+      if (!link && IbonAdapter.pageKind() === 'buyer-info' && deepAll('a, button').some((el) => norm(el.textContent) === '登出' && isVisible(el))) {
+        return { state: 'logged-in', verified: true, msg: '頁首有「登出」：已經登入（購票流程頁，2026-10-16 真站快照看過）' };
+      }
       return link
         ? { state: 'logged-out', verified: true, msg: '頁首有「快速登入」：目前沒有登入。購票前請先登入（購票須知也這樣要求）' }
         : { state: 'unknown', verified: false, msg: '頁首沒看到「快速登入」，可能已經登入（登入後的頁首還沒在真站核對過）' };
@@ -94,6 +157,9 @@
       const hints = kind === 'activity' ? [] : stateHints(visibleText());
       return { kind, label: page.label, verified: page.verified, login: IbonAdapter.loginState(), hints, policy: IBON_POLICY };
     },
+
+    /** 填寫購票資訊（UTK0206）：訂單內容、保留時間、要你自己填選的項目（只讀） */
+    readBuyerInfo: () => parseBuyerInfo(readBuyerInfo()),
 
     /** 這一頁助手能做什麼、要你自己做什麼（lib/ibon.js 的 IBON_POLICY） */
     supportedActions: () => IBON_POLICY,
