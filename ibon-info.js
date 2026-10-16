@@ -1193,7 +1193,9 @@
     const t0 = Date.now();
     while (Date.now() - t0 < 20000) {
       if (stop()) return;
-      if (await ibonFlowStep(kind, cfg)) { try { sessionStorage.setItem(guardKey, '1'); } catch (_) {} return; }
+      const done = await ibonFlowStep(kind, cfg);
+      if (done === 'reload') return;   // 這一步會讓頁面重新載入，載入後這支程式會再跑一次
+      if (done) { try { sessionStorage.setItem(guardKey, '1'); } catch (_) {} return; }
       await sleep(300);
     }
   }
@@ -1205,7 +1207,7 @@
   /** 做完這一頁該做的事回 true；還沒準備好（頁面還在載入）回 false */
   async function ibonFlowStep(kind, cfg) {
     if (kind === 'purchase-entry') {
-      const rows = deepAll('tbody tr').filter((r) => flowVisible(r) && r.querySelector('a[href], a[onclick]'));
+      const rows = deepAll('tbody tr').filter((r) => flowVisible(r) && /熱賣中|售完|額滿|剩餘|尚有|\d+\s*$|NT/.test(norm(r.textContent)) && $$('td', r).length >= 2);
       if (!rows.length) return false;
       // 排除字（同 kktix 助手 exclude）：名稱含這些字的票區一律不選，沒設定就用預設
       const exclude = (cfg.exclude == null ? DEFAULT_EXCLUDE : String(cfg.exclude).split(/\r?\n/)).map((x) => norm(x)).filter(Boolean);
@@ -1219,23 +1221,36 @@
       }
       if (!pick && !lines.length) pick = ok[0];
       if (!pick) return true;   // 沒有對得上的區：不選，交給你
-      const a = pick.querySelector('a[href], a[onclick]');
-      a.click();
+      (pick.querySelector('a[href], a[onclick]') || pick).click();   // 有連結點連結，沒有就點整列
       return true;
     }
     if (kind === 'purchase') {
-      const sels = deepAll('table.rwdtable select.form-control-sm, table.table select[name*="AMOUNT_DDL"], select.form-control-sm').filter(flowVisible);
-      if (!sels.length) return false;
+      // 第 3 步「座位/數量」（UTK0202_，2026-10-16 真站快照）：先有「票區價格」下拉（#…_PRICE，多票區才有），再有「購買數量」表格（#…_DataGrid）
+      const price = $('#ctl00_ContentPlaceHolder1_PRICE');
+      const grid = $('#ctl00_ContentPlaceHolder1_DataGrid') || $('table.rwdtable');
+      if (price && flowVisible(price) && price.selectedIndex <= 0) {
+        const exclude = (cfg.exclude == null ? DEFAULT_EXCLUDE : String(cfg.exclude).split(/\r?\n/)).map((x) => norm(x)).filter(Boolean);
+        const opts = [...price.options].slice(1).filter((o) => { const t = norm(o.text); return o.value && !soldOut(t) && !exclude.some((x) => t.toLowerCase().includes(x.toLowerCase())); });
+        const lines = String(cfg.areas || '').split(/\r?\n/).map((l) => norm(l)).filter(Boolean);
+        let pick = null;
+        for (const l of lines) { const terms = l.split(' '); pick = opts.find((o) => terms.every((t) => norm(o.text).includes(t))); if (pick) break; }
+        if (!pick && !lines.length) pick = opts[0];
+        if (!pick) return true;   // 沒有對得上的票區：不選，交給你
+        price.value = pick.value;
+        price.dispatchEvent(new Event('change', { bubbles: true }));
+        return 'reload';   // 選了票區，ibon 會回傳重畫數量表
+      }
+      if (!grid) return false;
+      const sel = deepAll('select.form-control-sm', grid).find(flowVisible);
+      if (!sel) return false;
       const want = Math.max(1, Math.min(Number(cfg.qty) || 1, 4));
-      const sel = sels[0];
       const opts = [...sel.options].map((o) => Number(o.value)).filter((n) => Number.isFinite(n) && n > 0);
       if (!opts.length) return true;
-      const n = Math.min(want, Math.max(...opts));
-      sel.value = String(n);
+      sel.value = String(Math.min(want, Math.max(...opts)));
       sel.dispatchEvent(new Event('change', { bubbles: true }));
       const captcha = deepAll('#ctl00_ContentPlaceHolder1_CHK, input[id*="CHK"]').find(flowVisible);
-      if (captcha) return true;   // 驗證碼由你輸入、你按下一步
-      const next = $('#ctl00_ContentPlaceHolder1_A2') || $('a[id*="AddShopingCart"]')
+      if (captcha) return true;   // 有驗證碼：由你輸入、你按下一步
+      const next = $('#ctl00_ContentPlaceHolder1_AddShopingCart') || $('#ctl00_ContentPlaceHolder1_A2') || $('a[id*="AddShopingCart"]')
         || deepAll('a.btn.btn-primary.btn-block').find((b) => flowVisible(b) && /下一步/.test(b.textContent));
       if (next) next.click();
       return true;
