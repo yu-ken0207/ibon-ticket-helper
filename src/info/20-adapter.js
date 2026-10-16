@@ -71,6 +71,11 @@
    * 填寫購票資訊（UTK0206，流程第 4 步）：照 2026-10-16 的真站快照讀，只讀看得到的字，整理交給 lib/ibon.js 的 parseBuyerInfo。
    * 用頁面上的字與 data-title 找位置，不靠 ASP.NET 產生的 id。聯絡電話、Email 只回「有沒有」，不讀內容。
    */
+  /** 購票流程頁上方的保留倒數「剩餘時間 mm:ss」（2026-10-16 真站快照在 UTK0206 的頁首看到；看得見的那一個）；沒有回 null */
+  function readCountdownText() {
+    return $$('span').filter((el) => isVisible(el)).map((el) => norm(el.textContent)).find((t) => /^剩餘時間\s*\d{1,2}\s*[:：]\s*\d{2}$/.test(t)) || null;
+  }
+
   function readBuyerInfo() {
     const vis = (el) => isVisible(el);
     const cardBody = (title) => {
@@ -99,7 +104,7 @@
     })) : [];
     const totalLabel = $$('div').find((el) => norm(el.textContent) === '總計(付款金額)');
     const totalEl = totalLabel && totalLabel.parentElement ? $('.total', totalLabel.parentElement) : null;
-    const countdown = $$('span').filter(vis).map((el) => norm(el.textContent)).find((t) => /^剩餘時間\s*\d{1,2}:\d{2}$/.test(t)) || null;
+    const countdown = readCountdownText();
     const field = (labelText) => {
       const lab = $$('label').find((l) => norm(l.textContent).replace(/^\*/, '') === labelText);
       return lab ? (lab.closest('.form-group') || lab.parentElement) : null;
@@ -160,6 +165,9 @@
 
     /** 填寫購票資訊（UTK0206）：訂單內容、保留時間、要你自己填選的項目（只讀） */
     readBuyerInfo: () => parseBuyerInfo(readBuyerInfo()),
+
+    /** 保留倒數：秒數；這一頁沒有回 null（只讀） */
+    readCountdown: () => parseCountdown(readCountdownText()),
 
     /** 這一頁助手能做什麼、要你自己做什麼（lib/ibon.js 的 IBON_POLICY） */
     supportedActions: () => IBON_POLICY,

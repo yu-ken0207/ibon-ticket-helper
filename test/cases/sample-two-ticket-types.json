@@ -1,0 +1,167 @@
+{
+ "name": "sample-two-ticket-types",
+ "from": {
+  "version": "0.8.0",
+  "createdAt": "2026-10-16T09:00:00.000Z",
+  "page": "填寫購票資訊（UTK0206，第 4 步）"
+ },
+ "problem": {
+  "kind": "advice",
+  "label": "建議不符",
+  "field": "核對",
+  "expected": "（範例，虛構）兩筆票種合計 2 張，應該核對一致"
+ },
+ "replay": {
+  "kind": "buyer-info",
+  "prevExpect": {
+   "step": "session",
+   "sessionText": "2026/12/05(六) 18:00 示範場"
+  },
+  "input": {
+   "step": {
+    "n": 4,
+    "text": "填寫購票資訊"
+   },
+   "title": "示範音樂會",
+   "rows": [
+    {
+     "name": "示範音樂會",
+     "time": "2026/12/05 18:00",
+     "venue": "示範展演廳",
+     "seat": "B區_1排-1號",
+     "ticketType": "全票",
+     "unitPrice": 1200,
+     "qty": 1,
+     "price": 1200
+    },
+    {
+     "name": "示範音樂會",
+     "time": "2026/12/05 18:00",
+     "venue": "示範展演廳",
+     "seat": "B區_1排-2號",
+     "ticketType": "學生票",
+     "unitPrice": 900,
+     "qty": 1,
+     "price": 900
+    }
+   ],
+   "total": 2100,
+   "holdLeft": {
+    "text": "08:00",
+    "seconds": 480
+   },
+   "discount": null,
+   "phoneFilled": false,
+   "emailShown": true,
+   "pay": {
+    "options": [
+     "信用卡"
+    ],
+    "chosen": null
+   },
+   "get": {
+    "options": [
+     "ibon紙票"
+    ],
+    "chosen": "ibon紙票"
+   },
+   "agree": false,
+   "next": "下一步，核對資料",
+   "captcha": null
+  },
+  "req": {
+   "keywords": [
+    "12/05 18:00"
+   ],
+   "tickets": [
+    {
+     "name": "全票",
+     "qty": 1
+    },
+    {
+     "name": "學生票",
+     "qty": 1
+    }
+   ],
+   "areas": [],
+   "maxUnitPrice": null,
+   "maxTotal": 2500
+  }
+ },
+ "todo": false,
+ "expect": {
+  "fields": {
+   "目前步驟": {
+    "status": "ok",
+    "value": "第 4 步：填寫購票資訊"
+   },
+   "場次時間": {
+    "status": "ok",
+    "value": "2026/12/05 18:00"
+   },
+   "場地": {
+    "status": "ok",
+    "value": "示範展演廳"
+   },
+   "票區／座位": {
+    "status": "ok",
+    "value": "B區_1排-1號、B區_1排-2號"
+   },
+   "票種": {
+    "status": "ok",
+    "value": "全票、學生票"
+   },
+   "單價": {
+    "status": "ok",
+    "value": "全票 NT$1200、學生票 NT$900"
+   },
+   "張數": {
+    "status": "ok",
+    "value": "2 張"
+   },
+   "總計": {
+    "status": "ok",
+    "value": "NT$2100"
+   },
+   "保留剩餘時間": {
+    "status": "ok",
+    "value": "08:00"
+   },
+   "剩餘數量": {
+    "status": "unavailable",
+    "value": null
+   },
+   "張數限制": {
+    "status": "unavailable",
+    "value": null
+   },
+   "聯絡電話": {
+    "status": "ok",
+    "value": "還沒填"
+   },
+   "付款方式": {
+    "status": "ok",
+    "value": "還沒選"
+   },
+   "取票方式": {
+    "status": "ok",
+    "value": "已選「ibon紙票」"
+   },
+   "同意條款": {
+    "status": "ok",
+    "value": "還沒勾選"
+   },
+   "驗證碼區域": {
+    "status": "unverified",
+    "value": "沒看到驗證碼字樣"
+   }
+  },
+  "verifyStatus": "ok",
+  "recommendationIncludes": [
+   "自己填聯絡電話",
+   "自己選付款方式",
+   "剩 08:00"
+  ]
+ },
+ "note": "範例案例：內容虛構，示範回報檔轉成的案例長什麼樣子"
+}

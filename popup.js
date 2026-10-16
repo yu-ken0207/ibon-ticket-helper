@@ -122,6 +122,7 @@ async function previewUrl() {
   runState = r.ok ? { runnable: !!r.runnable, note: r.runNote || '' } : { runnable: false, note: r.error || '背景程式沒有回應，請重新開啟這個視窗' };
   applyRunState();
   $('infoBox').hidden = !(r.ok && r.ibonKind);
+  if (!$('infoBox').hidden) refreshSale();
   renderPolicy(r.ok ? r.policy : null);
   if (r.ok && r.regUrl) { hint.textContent = `${r.label}，時段列表：${r.regUrl}`; hint.className = 'hint'; }
   else if (r.ok && r.info) {
@@ -202,6 +203,7 @@ $('btnInfo').addEventListener('click', async () => {
   renderMatch(r.ok ? r.match : null);
   btn.disabled = false;
   refresh();
+  refreshSale();
 });
 
 /* ───────────── ibon：需求比對、資料檢查、目前分頁、操作政策（都只讀） ───────────── */
@@ -327,6 +329,8 @@ function renderTask(task, now, labels = {}) {
   if (wf) box.append(el('div', { class: 'wfstate' }, `流程：${labels[wf.state] || wf.state}`));
   if (task.handoff) box.append(renderHandoff(task.handoff));
   if (task.guide) box.append(renderGuide(task.guide));
+  if (task.mode === 'guide' && task.phase === 'running' && task.hold) box.append(renderHold(task.hold, now));
+  syncReport(task);
 
   const dl = el('dl');
   const row = (k, v) => { dl.append(el('dt', {}, k), el('dd', {}, v)); };
@@ -359,6 +363,92 @@ function renderTask(task, now, labels = {}) {
 
 /** 人工操作模式：這一頁的核對結果、建議與依據、各欄位讀取結果 */
 const FIELD_MARK = { ok: '✓ 讀取成功', unverified: '？ 尚未驗證', fail: '✗ 讀取失敗', unavailable: '— 這一頁沒有' };
+/** 保留倒數：可靠就顯示推算的剩餘時間與通知狀態；看不出來就說未知，以頁面為準 */
+function renderHold(h, now) {
+  if (h.status !== 'ok' || !h.deadline) return el('div', { class: 'warn hold' }, `保留倒數：未知（${h.reason || '看不出來'}），以頁面上的時間為準，不會提醒`);
+  const left = Math.max(0, Math.round((h.deadline - now) / 1000));
+  const sent = [120, 60].filter((s) => h.notified && h.notified[s]).map((s) => `${s / 60} 分鐘`);
+  return el('div', { class: left <= 120 ? 'warn hold' : 'hint hold' },
+    left > 0 ? `保留倒數：剩約 ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}（照頁面上的「剩餘時間」推算${h.checked ? '' : '，還在核對倒數有沒有在走'}）。剩 2 分鐘、1 分鐘時通知你${sent.length ? `；已通知：${sent.join('、')}` : ''}`
+      : '保留倒數：照頁面推算已經到時間了，請看頁面');
+}
+
+/* ───────────── 問題回報 ───────────── */
+
+let reportFor = '';
+/** 人工操作模式讀到頁面時才顯示回報；「哪一項」的選項跟著目前這一頁的欄位換（你選到一半不會被洗掉） */
+function syncReport(task) {
+  const box = $('reportBox');
+  const g = task && task.mode === 'guide' && task.guide;
+  box.hidden = !g;
+  if (!g) return;
+  const key = `${g.n}|${g.pageKind}`;
+  if (key === reportFor) return;
+  reportFor = key;
+  const sel = $('reportField');
+  sel.replaceChildren(...['建議', '核對', ...(g.fields || []).map((f) => f.field), '其他'].map((f) => el('option', { value: f }, f)));
+}
+
+$('btnReport').addEventListener('click', async () => {
+  const out = $('reportMsg');
+  out.textContent = '產生中…（只讀）';
+  out.className = 'hint';
+  const own = [$('profileName').value.trim(), $('profilePhone').value.trim(), $('profilePhone').value.replace(/[\s-]/g, ''), $('profileEmail').value.trim()].filter((x) => x.length >= 2);
+  const r = await send({ type: 'ibon-report', kind: $('reportKind').value, field: $('reportField').value, expected: $('reportExpected').value.trim(), withSnapshot: $('reportSnap').checked, own });
+  if (!r.ok) { out.textContent = r.error || '沒有產生'; out.className = 'hint bad'; return; }
+  const blob = new Blob([JSON.stringify(r.report, null, 1)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const now = new Date();
+  const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+  const a = el('a', { href: url, download: `ibon-report-${r.report.page.kind || 'page'}-${stamp}.json` });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+  out.textContent = '已產生回報檔（下載資料夾）。交出去之前可以打開看過';
+  out.className = 'hint good';
+  $('reportExpected').value = '';
+});
+
+/* ───────────── 開賣提醒 ───────────── */
+
+async function refreshSale() {
+  const r = await send({ type: 'sale-remind-list', url: $('eventUrl').value.trim() });
+  const list = $('saleList');
+  list.replaceChildren();
+  if (!r.ok) return;
+  if (r.sale && r.sale.unknown && !r.sale.items.some((x) => !x.past)) list.append(el('div', { class: 'hint' }, `開賣時間：未知（${r.sale.unknown}），不能設定提醒`));
+  for (const x of (r.sale && r.sale.items) || []) {
+    if (!x.verified) list.append(el('div', { class: 'warn' }, `「${x.text}」的開賣時間來自${x.source}`));
+  }
+  for (const m of r.reminders || []) {
+    const left = m.ms - r.now;
+    const row = el('div', { class: 'checkrow' });
+    const sent = [300, 60].filter((s) => m.notified && m.notified[s]).map((s) => `${s / 60} 分鐘`);
+    row.append(el('span', {}, `⏰ ${m.title}：${saleText(m.ms)} 開賣${left > 0 ? `（還有約 ${fmtLeft(left)}）` : '（已開賣）'}${sent.length ? `，已通知：${sent.join('、')}` : ''}`));
+    const b = el('button', { class: 'link', type: 'button' }, '取消');
+    b.addEventListener('click', async () => { await send({ type: 'sale-remind-cancel', id: m.id }); refreshSale(); });
+    row.append(b);
+    list.append(row);
+  }
+}
+const saleText = (ms) => {
+  const d = new Date(ms + 8 * 3600000);
+  return `${d.getUTCMonth() + 1}/${d.getUTCDate()} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}（台灣時間）`;
+};
+const fmtLeft = (ms) => {
+  const m = Math.round(ms / 60000);
+  return m >= 1440 ? `${Math.floor(m / 1440)} 天 ${Math.floor((m % 1440) / 60)} 小時` : m >= 60 ? `${Math.floor(m / 60)} 小時 ${m % 60} 分` : `${m} 分鐘`;
+};
+
+$('btnSaleRemind').addEventListener('click', async () => {
+  const out = $('saleMsg');
+  const r = await send({ type: 'sale-remind', url: $('eventUrl').value.trim() });
+  out.textContent = r.ok ? `已設定 ${r.added} 個開賣提醒` : (r.error || '沒有設定');
+  out.className = 'hint ' + (r.ok ? 'good' : 'bad');
+  refreshSale();
+});
+
 function renderGuide(g) {
   const box = el('div', { class: 'guide' });
   box.append(el('div', { class: 'title' }, `人工操作模式：第 ${g.n} 頁，${g.label}`));

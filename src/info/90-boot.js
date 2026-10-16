@@ -37,6 +37,18 @@
     return true;
   });
 
+  /* 保留倒數：人工操作模式的購票流程頁，每 10 秒讀一次「剩餘時間」交給背景程式（只讀；不重新整理、不點擊）。
+   * 背景程式說人工操作模式結束了就停。 */
+  const COUNTDOWN_EVERY_MS = 10000;
+  function watchCountdown() {
+    const tick = async () => {
+      let r = null;
+      try { r = await chrome.runtime.sendMessage({ type: 'guide-hold', payload: { secs: IbonAdapter.readCountdown(), kind: IbonAdapter.pageKind() } }); } catch (_) { return; }
+      if (r && r.guide) setTimeout(tick, COUNTDOWN_EVERY_MS);
+    };
+    tick();
+  }
+
   (async () => {
     let r = null;
     try { r = await chrome.runtime.sendMessage({ type: 'info-hello', payload: { url: location.href } }); } catch (_) { return; }
@@ -47,6 +59,7 @@
       if (g && g.guide) {
         const out = await guideRead().catch((e) => ({ ok: false, error: String(e) }));
         try { await chrome.runtime.sendMessage({ type: 'guide-report', payload: out }); } catch (_) { /* 背景程式不在了 */ }
+        if (IbonAdapter.pageKind() !== 'activity') watchCountdown();
       }
       return;   // 不是要讀資訊的分頁：其他什麼都不做
     }

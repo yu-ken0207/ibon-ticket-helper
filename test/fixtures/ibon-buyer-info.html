@@ -11,6 +11,7 @@
   內容全部虛構（活動、場地、座位、價格、電話、Email），不是任何官方網站，也不會被部署。
   電話欄預先填了假號碼、Email 顯示假信箱：測試確認助手只回「有沒有」，沒把內容帶出去。
   任何按鈕或連結被點到就打一個 /__clicked 請求。
+  保留倒數每秒減一（網址加 ?cd=秒數 設定起點，加 &freeze=1 讓倒數停住），用來測保留提醒。
 -->
 <p style="background:#fde68a;padding:6px">測試用頁面：結構照真站快照，內容是虛構的，不是任何官方網站。</p>
 <header>
@@ -72,6 +73,12 @@
   </div>
 </div></div></section>
 <script>
+  const q = new URLSearchParams(location.search);
+  let left = Number(q.get('cd') || 465);
+  const cd = document.getElementById('countdown');
+  const show = () => { cd.textContent = `剩餘時間${String(Math.floor(left / 60)).padStart(2, '0')}:${String(left % 60).padStart(2, '0')}`; };
+  show();
+  if (!q.get('freeze')) setInterval(() => { if (left > 0) left--; show(); }, 1000);
   const clicked = (e) => { e.preventDefault(); fetch('/__clicked', { method: 'POST' }); };
   for (const b of document.querySelectorAll('.clk, header a')) b.addEventListener('click', clicked);
 </script>

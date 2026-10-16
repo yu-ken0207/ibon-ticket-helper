@@ -32,7 +32,8 @@ import { sanitizeBox, BLACKBOX_MAX } from './lib/box.js';
 import { siteOf, targetUrlOf, siteKey, siteLabel, pageKindOf, infoSiteOf, infoUrlOf, INFO_SITES } from './lib/sites.js';
 import { parseTicketLines, cleanProfile, checkProfile, describeProfileProblem } from './lib/flow.js';
 import { sanitizeInfo } from './lib/eventinfo.js';
-import { ibonPageKind, isIbonPage, IBON_PAGE_INFO, IBON_POLICY, validateEventInfo, matchIbonPrefs, leakCheck } from './lib/ibon.js';
+import { ibonPageKind, isIbonPage, IBON_PAGE_INFO, IBON_POLICY, validateEventInfo, matchIbonPrefs, leakCheck, maskUrl } from './lib/ibon.js';
+import { updateHold, holdDue, holdAlarms, holdRemaining, mmss, saleTimesOf, saleDue, saleAlarms, taipeiText } from './lib/reminders.js';
 import { STATES, newWorkflow, transition, stateOfResult, composeHandoff } from './lib/workflow.js';
 import { policyDecision } from './lib/policy.js';
 import { guideActivity, guidePurchase, guideBuyerInfo, guideOther } from './lib/guide.js';
@@ -40,6 +41,14 @@ import { guideActivity, guidePurchase, guideBuyerInfo, guideOther } from './lib/
 const ALARM_OPEN = 'ith-open';
 const ALARM_WATCH = 'ith-watch';
 const ALARM_FIRE = 'ith-fire';
+const ALARM_HOLD = 'ith-hold|';   // + 段（秒）：人工操作模式的保留倒數提醒，跟著任務
+const ALARM_SALE = 'ith-sale|';   // + 提醒 id|段：開賣提醒，不跟任務綁，取消任務不會清掉
+
+/** 清掉任務自己的 alarm（排程、開頁、到點、保留倒數）；開賣提醒留著 */
+async function clearTaskAlarms() {
+  const all = await chrome.alarms.getAll();
+  await Promise.all(all.filter((a) => !a.name.startsWith(ALARM_SALE)).map((a) => chrome.alarms.clear(a.name)));
+}
 const LOG_MAX = 300;
 
 const DEFAULTS = {
@@ -216,7 +225,7 @@ async function schedule(raw) {
   const openAt = targetTs - cfg.preOpenSec * 1000;
   const task = newTask(cfg, 'scheduled', { targetTs, openAt });
   await serial(() => set({ task }));
-  await chrome.alarms.clearAll();
+  await clearTaskAlarms();
   await badge('⏱', '#0f766e');
   addLog(`已排程：${fmt(targetTs)} 開賣，${fmt(openAt)} 開啟時段列表`);
   if (openAt <= Date.now()) await openTarget();
@@ -266,7 +275,7 @@ async function runNow(raw, tabIdHint) {
   const midFlow = sameSiteTab && ['list', 'select', 'info', 'confirm'].includes(pageKindOf(cfg.site, tab.url));
 
   await retireOld();
-  await chrome.alarms.clearAll();
+  await clearTaskAlarms();
   let tabId = tab ? tab.id : null;
   if (!sameSiteTab) {
     // 目前分頁不是這個站：開新分頁，不要把你正在看的網頁導走
@@ -284,7 +293,7 @@ async function runNow(raw, tabIdHint) {
 }
 
 async function cancel(reason = '已取消任務') {
-  await chrome.alarms.clearAll();
+  await clearTaskAlarms();
   const t = await serial(async () => {
     const task = await getTask();
     if (!task || !ACTIVE_PHASES.includes(task.phase)) return null;
@@ -474,7 +483,7 @@ async function startGuide(raw) {
   let tab = (await chrome.tabs.query({})).find((t) => t.url && infoUrlOf(t.url) === url && !pendingInfo.has(t.id));
   if (!tab) tab = await chrome.tabs.create({ url, active: true });
   await retireOld();
-  await chrome.alarms.clearAll();
+  await clearTaskAlarms();
   const task = { ...newTask({ ...cfg, site: 'ibon' }, 'guide', { tabId: tab.id, startedAt: Date.now() }), site: 'ibon', guide: null };
   await serial(() => set({ task }));
   await badge('人', '#0f766e');
@@ -522,17 +531,159 @@ function onGuideReport(tabId, p) {
     const t = await getTask();
     if (!t || t.mode !== 'guide' || t.tabId !== tabId || t.phase !== 'running') return { ok: false };
     const kind = str(p.kind, 20);
-    let g;
-    if (kind === 'activity' && p.info) g = guideActivity(sanitizeInfo(p.info), t.cfg);
-    else if (kind === 'buyer-info' && p.detail) g = guideBuyerInfo(cleanBuyer(p.detail), t.guide, t.cfg);
-    else if ((kind === 'purchase-entry' || kind === 'purchase') && p.state) g = guidePurchase(cleanState(p.state), t.guide);
+    let g, input = null;
+    if (kind === 'activity' && p.info) { input = sanitizeInfo(p.info); g = guideActivity(input, t.cfg); }
+    else if (kind === 'buyer-info' && p.detail) { input = cleanBuyer(p.detail); g = guideBuyerInfo(input, t.guide, t.cfg); }
+    else if ((kind === 'purchase-entry' || kind === 'purchase') && p.state) { input = cleanState(p.state); g = guidePurchase(input, t.guide); }
     else g = guideOther(kind);
+    // 問題回報用：這一頁交給 lib/guide.js 的內容與上一步的預期，之後可以原樣重跑（都是整理過的欄位，沒有電話、Email）
+    const replay = { kind, input, prevExpect: (t.guide && t.guide.expect) || null };
     let wf = transition(t.wf, 'PAGE_DETECTION', { reason: `人工操作模式：${g.label}`, force: true }).wf;
     for (const st of GUIDE_STATES[kind] || []) wf = transition(wf, st, { reason: '人工操作模式：這一步由你自己做', force: true }).wf;
     const guide = { ...g, n: ((t.guide && t.guide.n) || 0) + 1, at: Date.now() };
-    await set({ task: { ...t, wf, guide } });
+    await set({ task: { ...t, wf, guide, replay } });
     return { ok: true };
   });
+}
+
+/* ───────────── 保留倒數提醒（A1） ─────────────
+ * 購票流程頁（UTK02）上的頁面程式每 10 秒讀一次「剩餘時間 mm:ss」交過來（只讀）。lib/reminders.js 判斷倒數可不可靠；
+ * 可靠才排 alarm（剩 2 分鐘、1 分鐘），同一段只通知一次；看不出來就標未知、不排。分頁在背景時計時器會變慢，alarm 補上。 */
+
+function onGuideHold(tabId, p) {
+  return serial(async () => {
+    const t = await getTask();
+    if (!t || t.mode !== 'guide' || t.tabId !== tabId || t.phase !== 'running') return { ok: false, guide: false };
+    const secs = Number.isInteger(p.secs) && p.secs >= 0 && p.secs < 6000 ? p.secs : null;
+    const hold = updateHold(t.hold, { secs, at: Date.now() });
+    if (!t.hold || t.hold.status !== hold.status) addLog(hold.status === 'ok' ? `保留倒數：剩 ${mmss(secs)}，剩 2 分鐘、1 分鐘時通知你` : `保留倒數：未知（${hold.reason}），以頁面為準`, hold.status === 'ok' ? 'info' : 'warn');
+    const next = await fireHold({ ...t, hold });
+    await set({ task: next });
+    await armHoldAlarms(next.hold);
+    return { ok: true, guide: true };
+  });
+}
+
+/** 到了就發通知（只發最急的一段）並記下來；回更新後的任務 */
+async function fireHold(t) {
+  const d = holdDue(t.hold, Date.now());
+  if (!d) return t;
+  const left = holdRemaining(t.hold, Date.now());
+  notify(`保留剩不到 ${d.stage / 60} 分鐘`, `依頁面倒數推算剩約 ${mmss(Math.max(0, Math.round(left / 1000)))}，時間到網站會釋出這筆保留。請自己完成並按下一步；助手不會替你操作。`, true);
+  addLog(`保留倒數：剩不到 ${d.stage / 60} 分鐘，已通知`, 'warn');
+  return { ...t, hold: { ...t.hold, notified: { ...(t.hold.notified || {}), ...Object.fromEntries(d.mark.map((s) => [s, true])) } } };
+}
+
+async function armHoldAlarms(hold) {
+  const all = await chrome.alarms.getAll();
+  await Promise.all(all.filter((a) => a.name.startsWith(ALARM_HOLD)).map((a) => chrome.alarms.clear(a.name)));
+  for (const a of holdAlarms(hold, Date.now())) await chrome.alarms.create(ALARM_HOLD + a.stage, { when: a.when });
+}
+
+async function onHoldAlarm() {
+  await serial(async () => {
+    const t = await getTask();
+    if (!t || t.mode !== 'guide' || t.phase !== 'running' || !t.hold) return;
+    const next = await fireHold(t);
+    if (next !== t) await set({ task: next });
+  });
+}
+
+/* ───────────── 開賣提醒（A2） ─────────────
+ * 用最近一次讀到的活動資訊（eventInfo）裡的開賣時間，開賣前 5 分鐘、1 分鐘各通知一次。只通知，不開頁、不重新整理、不購票。
+ * 開賣時間只寫日期、或都已經過了，就說看不出來，不排。存在 saleReminders，跟任務無關；瀏覽器重開後重新掛上。 */
+const SALE_MAX = 20;
+
+async function setSaleReminder(rawUrl) {
+  const url = infoUrlOf(rawUrl);
+  const { eventInfo = null, saleReminders = [] } = await get(['eventInfo', 'saleReminders']);
+  if (!url || !eventInfo || eventInfo.url !== url) return { ok: false, error: '請先按「讀取活動資訊」讀這個活動頁，再設定開賣提醒' };
+  const now = Date.now();
+  const st = saleTimesOf(eventInfo, now);
+  const future = st.items.filter((x) => !x.past);
+  if (!future.length) return { ok: false, unknown: st.unknown, error: `開賣時間未知：${st.unknown}。沒有設定提醒` };
+  const keep = saleReminders.filter((r) => !(r.url === url && future.some((x) => x.ms === r.ms)) && r.ms > now);
+  const added = future.map((x) => ({ id: `${Math.round(x.ms / 60000)}-${url.match(/\d+$/)[0]}`, url, title: str(eventInfo.title, 80) || '活動', ms: x.ms, text: x.text, source: x.source, verified: x.verified, notified: {} }));
+  const list = [...keep, ...added].sort((a, b) => a.ms - b.ms).slice(0, SALE_MAX);
+  await set({ saleReminders: list });
+  await armSaleAlarms(list);
+  addLog(`開賣提醒：${added.map((r) => taipeiText(r.ms)).join('、')}（開賣前 5 分鐘、1 分鐘通知；不會自動重新整理或購票）`);
+  return { ok: true, added: added.length, reminders: list, unknown: st.unknown };
+}
+
+async function armSaleAlarms(list) {
+  const all = await chrome.alarms.getAll();
+  await Promise.all(all.filter((a) => a.name.startsWith(ALARM_SALE)).map((a) => chrome.alarms.clear(a.name)));
+  const now = Date.now();
+  for (const r of list) for (const a of saleAlarms(r, now)) await chrome.alarms.create(`${ALARM_SALE}${r.id}|${a.stage}`, { when: a.when });
+}
+
+/** 到了的開賣提醒發出去；已經開賣的拿掉。瀏覽器關著錯過的段：還沒開賣就補發最急的一段 */
+async function fireSaleReminders() {
+  return serial(async () => {
+    const { saleReminders = [] } = await get('saleReminders');
+    const now = Date.now();
+    const next = [];
+    for (const r of saleReminders) {
+      if (r.ms <= now) continue;
+      const d = saleDue(r, now);
+      if (d) {
+        const min = Math.max(1, Math.round((r.ms - now) / 60000));
+        notify(`${r.title}：約 ${min} 分鐘後開賣`, `${taipeiText(r.ms)} 開賣（${r.source}）。請自己到活動頁準備、登入；助手不會自動重新整理或購票。`, true);
+        addLog(`開賣提醒：「${r.title}」約 ${min} 分鐘後開賣，已通知`);
+        next.push({ ...r, notified: { ...(r.notified || {}), ...Object.fromEntries(d.mark.map((s) => [s, true])) } });
+      } else next.push(r);
+    }
+    await set({ saleReminders: next });
+    return next;
+  });
+}
+
+async function cancelSaleReminder(id) {
+  const { saleReminders = [] } = await get('saleReminders');
+  const list = saleReminders.filter((r) => r.id !== id);
+  await set({ saleReminders: list });
+  await armSaleAlarms(list);
+  return { ok: true, reminders: list };
+}
+
+async function restoreSaleReminders() {
+  const list = await fireSaleReminders();
+  await armSaleAlarms(list);
+}
+
+/* ───────────── 問題回報（A3） ─────────────
+ * 你覺得這一頁讀錯、建議不對時，產生一份回報檔：這一頁的讀取結果、建議、核對，加上能原樣重跑的輸入（task.replay）與需求（不含購票人資料）。
+ * 可以附這一頁的結構快照（同一套遮罩）。存檔前整份再掃一次個資，還找得到就不產生。 */
+const REPORT_KINDS = { parse: '讀取錯誤', advice: '建議不符', other: '其他' };
+
+async function buildReport(m) {
+  const t = await getTask();
+  if (!t || t.mode !== 'guide' || !t.guide) return { ok: false, error: '要在人工操作模式讀到頁面之後才能回報' };
+  const own = arr(m.own, 4).map((x) => str(x, 60));
+  const tab = await chrome.tabs.get(t.tabId).catch(() => null);
+  const c = t.cfg || {};
+  const report = {
+    type: 'ibon-guide-report', version: chrome.runtime.getManifest().version, createdAt: new Date().toISOString(),
+    page: { kind: t.guide.pageKind, label: t.guide.label, n: t.guide.n, url: tab && tab.url ? maskUrl(tab.url) : null },
+    problem: { kind: REPORT_KINDS[m.kind] ? m.kind : 'other', label: REPORT_KINDS[m.kind] || REPORT_KINDS.other, field: str(m.field, 40) || null, expected: str(m.expected, 300) },
+    guide: { fields: t.guide.fields, recommendation: t.guide.recommendation, verify: t.guide.verify, basis: t.guide.basis },
+    replay: { ...(t.replay || {}), req: { keywords: c.keywords, tickets: c.tickets, areas: c.areas, maxUnitPrice: c.maxUnitPrice, maxTotal: c.maxTotal } },
+    hold: t.hold ? { status: t.hold.status, reason: t.hold.reason, lastSecs: t.hold.lastSecs } : null,
+    snapshot: null,
+  };
+  if (m.withSnapshot && tab) {
+    const r = await chrome.tabs.sendMessage(tab.id, { type: 'page-snapshot', own }).catch(() => null);
+    // 時間戳改成日期字串：不然 13 位數字會被個資檢查當成長數字
+    report.snapshot = r && r.ok ? { ...r.snapshot, takenAt: new Date(r.snapshot.takenAt || Date.now()).toISOString() } : { error: '這一頁拿不到快照（可能已經換頁或重新整理）' };
+  }
+  const leaks = leakCheck(JSON.stringify(report), own);
+  if (leaks.length) {
+    addLog(`問題回報沒有產生：還找得到 ${leaks.join('、')}`, 'warn');
+    return { ok: false, leaks, error: `回報內容裡還找得到 ${leaks.join('、')}（可能在你填的說明或頁面上），為了保護個資沒有產生。請改掉說明裡的個資，或不要附快照再試一次` };
+  }
+  addLog(`產生問題回報：${report.page.label}，${report.problem.label}${report.problem.field ? `（${report.problem.field}）` : ''}`);
+  return { ok: true, report };
 }
 
 /* ───────────────────────── 流程報到、PolicyGate ───────────────────────── */
@@ -809,9 +960,9 @@ chrome.tabs.onUpdated.addListener((tabId, info) => {
 
 /* ───────────────────────── 訊息入口 ───────────────────────── */
 
-const POPUP_TYPES = new Set(['schedule', 'run-now', 'resume', 'pause', 'cancel', 'status', 'clear-logs', 'preview-url', 'check-slots', 'health-check', 'read-info', 'match-info', 'ibon-page', 'ibon-guide']);
+const POPUP_TYPES = new Set(['schedule', 'run-now', 'resume', 'pause', 'cancel', 'status', 'clear-logs', 'preview-url', 'check-slots', 'health-check', 'read-info', 'match-info', 'ibon-page', 'ibon-guide', 'sale-remind', 'sale-remind-list', 'sale-remind-cancel', 'ibon-report']);
 // ibon 的頁面（活動頁、購票頁）只能送這兩種
-const INFO_PAGE_TYPES = new Set(['info-hello', 'info-result', 'guide-hello', 'guide-report']);
+const INFO_PAGE_TYPES = new Set(['info-hello', 'info-result', 'guide-hello', 'guide-report', 'guide-hold']);
 const PAGE_TYPES = new Set(['hello', 'fired', 'fired-drift', 'retry', 'result', 'log', 'warn', 'abort-request', 'check-result', 'load-ok', 'clock', 'health-result', 'blackbox', 'skip-slot', 'rate-seen', 'wf', 'gate', 'skip-area']);
 
 async function handle(msg, sender) {
@@ -828,6 +979,7 @@ async function handle(msg, sender) {
     if (type === 'info-hello') return { read: pendingInfo.has(tabId) };
     if (type === 'guide-hello') { const t = await getTask(); return { guide: !!(t && t.mode === 'guide' && t.tabId === tabId && t.phase === 'running') }; }
     if (type === 'guide-report') return onGuideReport(tabId, msg.payload || {});
+    if (type === 'guide-hold') return onGuideHold(tabId, msg.payload || {});
     return { ok: finishInfo(tabId, msg.payload || {}) };
   }
 
@@ -967,6 +1119,15 @@ async function handle(msg, sender) {
     }
     case 'ibon-page': return ibonPage(msg.op, msg.own);
     case 'ibon-guide': return startGuide(msg.cfg);
+    case 'sale-remind': return setSaleReminder(msg.url);
+    case 'sale-remind-list': {
+      const { saleReminders = [], eventInfo = null } = await get(['saleReminders', 'eventInfo']);
+      const url = infoUrlOf(msg.url);
+      const sale = eventInfo && url && eventInfo.url === url ? saleTimesOf(eventInfo, Date.now()) : null;
+      return { ok: true, reminders: saleReminders, sale, now: Date.now() };
+    }
+    case 'sale-remind-cancel': return cancelSaleReminder(str(msg.id, 40));
+    case 'ibon-report': return buildReport(msg);
     case 'cancel': return cancel();
     case 'clear-logs': await serial(() => set({ logs: [], blackbox: [] })); return { ok: true };
     case 'preview-url': {
@@ -994,6 +1155,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name === ALARM_FIRE) { await armFireWatch(); return; }
+  if (alarm.name.startsWith(ALARM_HOLD)) { await onHoldAlarm(); return; }
+  if (alarm.name.startsWith(ALARM_SALE)) { await fireSaleReminders(); return; }
   if (alarm.name !== ALARM_OPEN && alarm.name !== ALARM_WATCH) return;
   const task = await getTask();
   if (!task || task.phase !== 'armed') {
@@ -1046,5 +1209,5 @@ async function restoreAlarms(reason) {
   await scheduleFireWatch(task.targetTs);
   await badge('⏱', '#0f766e');
 }
-chrome.runtime.onStartup.addListener(() => restoreAlarms('startup'));
-chrome.runtime.onInstalled.addListener((d) => { if (d && d.reason === 'update') restoreAlarms('reload'); });
+chrome.runtime.onStartup.addListener(() => { restoreAlarms('startup'); restoreSaleReminders(); });
+chrome.runtime.onInstalled.addListener((d) => { if (d && d.reason === 'update') restoreAlarms('reload'); restoreSaleReminders(); });

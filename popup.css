@@ -152,3 +152,10 @@ fieldset.prefs legend { font-weight: 700; padding: 0 4px; }
 .task .guide table { width: 100%; border-collapse: collapse; }
 .task .guide td { padding: 2px 4px; border-bottom: 1px solid var(--line); vertical-align: top; }
 .task .guide .s-ok { color: var(--ok); } .task .guide .s-fail { color: var(--err); } .task .guide .s-unverified { color: var(--warn); } .task .guide .s-unavailable { color: var(--muted); }
+
+/* 保留倒數、問題回報、開賣提醒 */
+.hold { margin: 6px 0; font-weight: 600; }
+.report { margin-top: 8px; border: 1px solid var(--line, #374151); border-radius: 8px; padding: 6px 10px; }
+.report summary { cursor: pointer; font-weight: 600; }
+.report textarea { width: 100%; box-sizing: border-box; }
+#saleList .checkrow span { flex: 1; }

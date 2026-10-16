@@ -24,6 +24,14 @@
     </div>
     <p id="infoMsg" class="hint" role="status"></p>
     <div id="infoView" class="infoview"></div>
+    <div id="saleBox" class="infoview">
+      <div class="checkrow">
+        <button id="btnSaleRemind" class="small" type="button">開賣前提醒我</button>
+        <span class="hint">照上面讀到的開賣時間（台灣時間），開賣前 5 分鐘、1 分鐘各發一次系統通知。只提醒，不會自動重新整理或購票</span>
+      </div>
+      <p id="saleMsg" class="hint" role="status"></p>
+      <div id="saleList"></div>
+    </div>
     <div id="checkView" class="infoview"></div>
 
     <div class="prefs">
@@ -135,6 +143,22 @@
   <section>
     <h2>目前任務</h2>
     <div id="taskBox" class="task">沒有任務</div>
+    <details id="reportBox" class="report" hidden>
+      <summary>回報這一頁的問題（讀錯、建議不對）</summary>
+      <label class="field">問題類型
+        <select id="reportKind"><option value="parse">讀取錯誤（欄位讀錯、沒讀到）</option><option value="advice">建議不符（建議或核對不對）</option><option value="other">其他</option></select>
+      </label>
+      <label class="field">哪一項
+        <select id="reportField"></select>
+      </label>
+      <label class="field">正確應該是（畫面上實際寫什麼）
+        <textarea id="reportExpected" rows="2" maxlength="300" placeholder="例如：票區應該是「B區」，價格 NT$3,800"></textarea>
+      </label>
+      <p class="hint">不要寫姓名、電話、Email、身分證或付款資料。產生前會整份再檢查一次，找到個資就不產生。</p>
+      <label class="check"><input id="reportSnap" type="checkbox" checked> 附上這一頁的結構快照（同樣遮罩；修讀取錯誤時需要）</label>
+      <button id="btnReport" class="small" type="button">產生回報檔</button>
+      <p id="reportMsg" class="hint" role="status"></p>
+    </details>
   </section>
 
   <section>

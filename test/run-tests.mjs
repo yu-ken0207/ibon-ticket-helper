@@ -1058,6 +1058,91 @@ const SCENARIOS = [
     },
   },
   {
+    name: 'ibon-reminders',
+    once: true,
+    title: 'ibon 提醒與回報（虛構樣本頁）：開賣前提醒排得對、同一段只通知一次；保留倒數剩 2 分鐘通知一次、倒數停住標未知；問題回報不帶個資；取消任務不清開賣提醒；不點任何東西',
+    async run({ ctx, popup }) {
+      ibonRequests.length = 0;
+      const bg = (msg) => popup.evaluate((m) => new Promise((r) => chrome.runtime.sendMessage(m, r)), msg);
+      const alarms = () => popup.evaluate(() => chrome.alarms.getAll().then((a) => a.map((x) => ({ name: x.name, when: x.scheduledTime }))));
+      const store = (k) => popup.evaluate((key) => chrome.storage.local.get(key).then((o) => o[key]), k);
+      const logCount = async (re) => ((await status(popup)).logs || []).filter((l) => re.test(l.msg)).length;
+      await popup.fill('#eventUrl', IBON_URL);
+      await popup.fill('#keywords', '12/05 18:00');
+      await popup.fill('#tickets', '全票 2');
+      await sleep(600);
+      // A2 開賣提醒：讀活動資訊 → 設定提醒
+      const noInfo = await bg({ type: 'sale-remind', url: 'https://ticket.ibon.com.tw/ActivityInfo/Details/99999' });
+      await popup.click('#btnInfo');
+      for (let i = 0; i < 60 && !/已讀取/.test(await popup.textContent('#infoMsg')); i++) await sleep(250);
+      await popup.click('#btnSaleRemind');
+      await sleep(600);
+      const saleMsg = await popup.textContent('#saleMsg');
+      const saleListText = await popup.textContent('#saleList');
+      const sa = (await alarms()).filter((a) => a.name.startsWith('ith-sale|')).map((a) => a.when).sort((x, y) => x - y);
+      const t1120 = Date.UTC(2026, 10, 20, 4, 0), t1125 = Date.UTC(2026, 10, 25, 4, 0);
+      const wantAlarms = [t1120 - 300000, t1120 - 60000, t1125 - 300000, t1125 - 60000];
+      // 通知路徑：放一個 200 秒後開賣的提醒，叫 alarm 跑兩次，只通知一次
+      const list0 = await store('saleReminders');
+      await popup.evaluate((l) => chrome.storage.local.set({ saleReminders: l }), [...list0, { id: 'e2e', url: IBON_URL, title: '測試提醒活動', ms: Date.now() + 200000, text: 'x', source: '節目介紹', verified: true, notified: {} }]);
+      for (let k = 0; k < 2; k++) {
+        await popup.evaluate(() => chrome.alarms.create('ith-sale|e2e|300', { when: Date.now() + 100 }));
+        await sleep(1500);
+      }
+      const fired = (await store('saleReminders')).find((r) => r.id === 'e2e');
+      const saleNotices = await logCount(/開賣提醒：「測試提醒活動」約 \d+ 分鐘後開賣/);
+      await bg({ type: 'sale-remind-cancel', id: 'e2e' });
+      // A1 保留倒數：開始人工操作模式，你自己走到填寫購票資訊（倒數 2:06 開始）
+      const page = await ctx.newPage();
+      await page.goto(IBON_URL);
+      await sleep(1500);
+      await popup.bringToFront();
+      await popup.click('#btnGuide');
+      await waitTask(popup, (t) => !!(t.guide && t.guide.pageKind === 'activity'), 20000);
+      await page.goto(`${IBON_BUYER_URL}?cd=126`);
+      const s1 = await waitTask(popup, (t) => !!(t.hold && t.hold.status === 'ok'), 20000);
+      const holdAl = (await alarms()).filter((a) => a.name.startsWith('ith-hold|')).map((a) => a.name);
+      const s2 = await waitTask(popup, (t) => !!(t.hold && t.hold.notified && t.hold.notified[120]), 25000);
+      await sleep(12000);   // 再讀一次倒數：同一段不重複
+      const holdNotices = await logCount(/保留倒數：剩不到 2 分鐘，已通知/);
+      const s3 = await status(popup);
+      let holdText = '';
+      for (let i = 0; i < 8 && !/保留倒數：剩約/.test(holdText); i++) { await sleep(250); holdText = await popup.textContent('#taskBox'); }
+      // A3 問題回報
+      const reportVisible = await popup.isVisible('#reportBox');
+      const opts = await popup.$$eval('#reportField option', (o) => o.map((x) => x.value));
+      const leak = await bg({ type: 'ibon-report', kind: 'parse', field: '張數', expected: '應該是 2 張，我的電話 0912345678', withSnapshot: false, own: [] });
+      const rep = await bg({ type: 'ibon-report', kind: 'parse', field: '張數', expected: '應該是 2 張', withSnapshot: true, own: [] });
+      const repRaw = JSON.stringify(rep.report || {});
+      // 倒數停住：未知、不排保留提醒
+      await page.goto(`${IBON_BUYER_URL}?cd=300&freeze=1`);
+      const s4 = await waitTask(popup, (t) => !!(t.hold && t.hold.status === 'unknown'), 30000);
+      const frozenAl = (await alarms()).filter((a) => a.name.startsWith('ith-hold|'));
+      let frozenText = '';
+      for (let i = 0; i < 8 && !/保留倒數：未知/.test(frozenText); i++) { await sleep(250); frozenText = await popup.textContent('#taskBox'); }
+      await popup.click('#btnCancel');
+      await waitTask(popup, (t) => t.phase === 'cancelled', 5000);
+      const after = await alarms();
+      const clicked = ibonRequests.filter((x) => /__clicked/.test(x));
+      const nonGet = ibonRequests.filter((x) => !x.startsWith('GET '));
+      return [
+        ['沒讀過這個活動就不設提醒', noInfo.ok === false && /先按「讀取活動資訊」/.test(noInfo.error), noInfo.error],
+        ['開賣提醒：節目介紹與場次小字各一個時間，開賣前 5 分鐘、1 分鐘（台灣時間）', /已設定 2 個開賣提醒/.test(saleMsg) && JSON.stringify(sa) === JSON.stringify(wantAlarms), `${saleMsg} ${JSON.stringify(sa)}`],
+        ['場次小字的時間照實標「寫法還沒在真站看過」', /場次旁的「開賣」小字（這種寫法還沒在真站看過）/.test(saleListText) && /11\/20 12:00（台灣時間）/.test(saleListText), saleListText.slice(0, 120)],
+        ['開賣提醒到點只通知一次', fired && fired.notified && fired.notified[300] === true && saleNotices === 1, `通知 ${saleNotices} 次`],
+        ['保留倒數讀到後排好 2 分鐘、1 分鐘的提醒', s1.task.hold.status === 'ok' && holdAl.includes('ith-hold|60'), JSON.stringify(holdAl)],
+        ['剩 2 分鐘時通知一次、不重複；1 分鐘那段還沒到', s2.task.hold.notified[120] === true && !s3.task.hold.notified[60] && holdNotices === 1, `通知 ${holdNotices} 次`],
+        ['設定頁顯示保留倒數與已通知', /保留倒數：剩約 1:\d\d/.test(holdText) && /已通知：2 分鐘/.test(holdText), holdText.match(/保留倒數[^。]*/)?.[0] || holdText.slice(0, 80)],
+        ['倒數停住：未知、不排提醒，設定頁說以頁面為準', /停住/.test(s4.task.hold.reason) && frozenAl.length === 0 && /保留倒數：未知.*以頁面上的時間為準/.test(frozenText), s4.task.hold.reason],
+        ['回報表單跟著這一頁的欄位', reportVisible && opts.includes('張數') && opts.includes('建議'), opts.join(',')],
+        ['回報說明裡有電話：不產生', leak.ok === false && /手機/.test(leak.error), leak.error],
+        ['回報檔：有能重跑的內容與快照，沒有電話、Email、網址參數值', rep.ok && rep.report.replay.kind === 'buyer-info' && rep.report.replay.req.tickets[0].name === '全票' && rep.report.snapshot && rep.report.snapshot.tree && !/0911222333|demo-buyer@example\.com|cd=126/.test(repRaw) && /cd=…/.test(rep.report.page.url), rep.error || rep.report.page.url],
+        ['取消任務清掉保留提醒，開賣提醒留著', !after.some((a) => a.name.startsWith('ith-hold|')) && after.filter((a) => a.name.startsWith('ith-sale|')).length === 4, after.map((a) => a.name).join(',')],
+        ['沒有點任何按鈕、沒有送出任何東西', clicked.length === 0 && nonGet.length === 0, `點擊 ${clicked.length}、非 GET ${nonGet.length}`],
+      ];
+    },
+  },
+  {
     name: 'run-gating',
     once: true,
     title: '選購按鈕能不能按，跟背景程式接不接受一致；停用時在按鈕下方寫原因；檢查做完不會把停用的按鈕又打開',
