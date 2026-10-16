@@ -17,6 +17,8 @@ for (const p of PW_PATHS) {
 const skip = chromium ? false : '找不到 Playwright（設定 PLAYWRIGHT_PATH）';
 
 const AGENT = fs.readFileSync(path.join(ROOT, 'page-agent.js'), 'utf8');
+// MAIN world 的小程式：測試裡把它點擊的那一行標上「在頁面環境」，用來分辨誰點的
+const HOOK = fs.readFileSync(path.join(ROOT, 'alert-hook.js'), 'utf8').replace('el.click();', 'window.__inMain = true; el.click(); window.__inMain = false;');
 const ACTIVITY = fs.readFileSync(path.join(ROOT, 'test/fixtures/ibon-activity.html'), 'utf8').replace('<a class="hv">快速登入</a>', '<a>登出</a>');
 const ACTIVITY_GUEST = fs.readFileSync(path.join(ROOT, 'test/fixtures/ibon-activity.html'), 'utf8');
 const BUYER = fs.readFileSync(path.join(ROOT, 'test/fixtures/ibon-buyer-info.html'), 'utf8');
@@ -41,7 +43,7 @@ const qtyPage = ({ priceSelected = false, captcha = false, max = 3 } = {}) => `
   <table id="ctl00_ContentPlaceHolder1_DataGrid" class="table table-sm rwdtable"><tbody><tr><th>內容</th><th>購買數量</th></tr>
     <tr><td data-title="內容">鐵粉席</td><td data-title="購買數量"><select id="q" class="form-control form-control-sm">${Array.from({ length: max + 1 }, (_, i) => `<option>${i}</option>`).join('')}</select></td></tr></tbody></table>
   ${captcha ? '<input id="ctl00_ContentPlaceHolder1_CHK" type="text">' : ''}
-  <a id="ctl00_ContentPlaceHolder1_AddShopingCart" class="btn btn-primary btn-block" href="#" onclick="document.title='NEXT q='+document.getElementById('q').value;return false">下一步</a>`;
+  <a id="ctl00_ContentPlaceHolder1_AddShopingCart" class="btn btn-primary btn-block" href="javascript:void(document.title='NEXT q='+document.getElementById('q').value)">下一步</a>`;
 
 const CFG = { sessionWhen: '2026/12/05 18:00', keywords: ['一般席'], qty: 2, exclude: undefined, fallback: false };
 
@@ -68,11 +70,20 @@ async function run({ url, html, directive, extra = {}, wait = 1500, alertAfter =
     window.chrome = { runtime: { id: 'x', lastError: null, onMessage: { addListener(fn) { window.__listeners.push(fn); } },
       sendMessage: (msg, cb) => { window.__bg(msg.type, msg.payload).then((r) => cb && cb(r)); } },
       dom: { openOrClosedShadowRoot: (el) => __roots.get(el) || null } };`);
+  // 模擬擴充功能環境的 CSP：不是從頁面環境（alert-hook.js）發出的 javascript: 連結點擊一律擋掉並記數
+  await page.addInitScript(`
+    window.__blocked = 0;
+    const __click = HTMLElement.prototype.click;
+    HTMLElement.prototype.click = function () {
+      if (this.tagName === 'A' && /^\\s*javascript:/i.test(this.getAttribute('href') || '') && !window.__inMain) { window.__blocked++; return; }
+      return __click.call(this);
+    };`);
+  await page.addInitScript(HOOK);
   await page.addInitScript(AGENT);
   await page.goto(url);
   if (alertAfter) await page.evaluate(alertAfter);
   await page.waitForTimeout(wait);
-  const out = { calls, title: await page.title(), q: await page.evaluate(() => (document.getElementById('q') || {}).value), page };
+  const out = { calls, blocked: await page.evaluate(() => window.__blocked || 0).catch(() => 0), title: await page.title(), q: await page.evaluate(() => (document.getElementById('q') || {}).value), page };
   Object.assign(out, extra);
   return out;
 }
@@ -164,9 +175,10 @@ test('座位/數量頁：票區價格還沒選 → 照關鍵字選（排除身�
   assert.equal(r.q, '0');   // 重載前先不選張數
 });
 
-test('座位/數量頁：票區已選 → 選張數、按下一步（用真實的 AddShopingCart）', { skip }, async () => {
-  const r = await run({ url: U.qty, html: qtyPage({ priceSelected: true }), directive: RUN({ qty: 2 }) });
+test('座位/數量頁：票區已選 → 選張數、按下一步（真站是 javascript:__doPostBack 連結，要由頁面環境代點，不然被擴充功能的 CSP 擋掉）', { skip }, async () => {
+  const r = await run({ url: U.qty, html: qtyPage({ priceSelected: true }), directive: RUN({ qty: 2 }), wait: 3200 });
   assert.equal(r.title, 'NEXT q=2');
+  assert.equal(r.blocked, 0, '助手沒有自己點 javascript: 連結');
 });
 
 test('座位/數量頁：張數超過這個票區的上限 → 不選，交給你', { skip }, async () => {
@@ -176,7 +188,7 @@ test('座位/數量頁：張數超過這個票區的上限 → 不選，交給�
 });
 
 test('座位/數量頁：有驗證碼 → 選好張數就停手，不按下一步', { skip }, async () => {
-  const r = await run({ url: U.qty, html: qtyPage({ priceSelected: true, captcha: true }), directive: RUN({ qty: 2 }) });
+  const r = await run({ url: U.qty, html: qtyPage({ priceSelected: true, captcha: true }), directive: RUN({ qty: 2 }), wait: 3200 });
   assert.equal(r.q, '2');
   assert.equal(result(r).kind, 'captcha');
   assert.equal(result(r).handOff, true);
@@ -184,8 +196,8 @@ test('座位/數量頁：有驗證碼 → 選好張數就停手，不按下一�
 });
 
 test('座位/數量頁：按下一步後網站用 alert 拒絕 → 向背景程式要求重試', { skip }, async () => {
-  const html = qtyPage({ priceSelected: true }).replace("document.title='NEXT q='+document.getElementById('q').value;return false", "alert('此票區已售完');return false");
-  const r = await run({ url: U.qty, html: html.replace('</table>', '</table><script>/* 模擬 alert-hook */const _a=window.alert;window.alert=function(m){window.postMessage({__ith:"alert",msg:String(m)},location.origin);};</script>'), directive: RUN({ qty: 1 }) });
+  const html = qtyPage({ priceSelected: true }).replace("javascript:void(document.title='NEXT q='+document.getElementById('q').value)", "javascript:alert('此票區已售完')");
+  const r = await run({ url: U.qty, html: html.replace('</table>', '</table><script>/* 模擬 alert-hook */const _a=window.alert;window.alert=function(m){window.postMessage({__ith:"alert",msg:String(m)},location.origin);};</script>'), directive: RUN({ qty: 1 }), wait: 2500 });
   const retry = r.calls.find((c) => c.type === 'retry');
   assert.ok(retry && retry.payload.reason === 'fail', JSON.stringify(kinds(r)));
   assert.match(retry.payload.msg, /已售完/);
@@ -194,7 +206,7 @@ test('座位/數量頁：按下一步後網站用 alert 拒絕 → 向背景程�
 test('填購票資訊頁：勾同意、按下一步', { skip }, async () => {
   let clicked = 0;
   const html = BUYER.replace("fetch('/__clicked', { method: 'POST' })", "window.__clicked=(window.__clicked||0)+1");
-  const r = await run({ url: U.buyer, html, directive: RUN() });
+  const r = await run({ url: U.buyer, html, directive: RUN(), wait: 2500 });
   assert.equal(await r.page.evaluate(() => document.getElementById('agreen').checked), true);
   assert.equal(await r.page.evaluate(() => window.__clicked || 0), 1);
   void clicked;
@@ -231,8 +243,26 @@ test('背景程式問「助手還在不在」（ping）：活動頁載入狀態�
 });
 
 test('按下一步後 ibon 處理得慢：等到 45 秒才算沒反應，中間顯示「已等 N 秒」，不重新整理', { skip }, async () => {
-  const r = await run({ url: U.qty, html: qtyPage({ priceSelected: true }), directive: RUN({ qty: 1 }), wait: 5200 });
+  const r = await run({ url: U.qty, html: qtyPage({ priceSelected: true }), directive: RUN({ qty: 1 }), wait: 5600 });
   assert.equal(r.title, 'NEXT q=1');
   assert.ok(!r.calls.some((c) => c.type === 'result'), '5 秒時還不能判定失敗');
   assert.ok(!r.calls.some((c) => c.type === 'retry'));
+});
+
+test('座位/數量頁：選了張數後 ibon 在背景更新並把張數重置 → 等安靜、重選，再按下一步（不撞在一起）', { skip }, async () => {
+  // 模擬 ibon：張數一變，0.6 秒後重畫表格（數量被重置成 0），重畫期間按下一步會卡住
+  const html = qtyPage({ priceSelected: true }).replace('<select id="q" class="form-control form-control-sm">',
+    `<select id="q" class="form-control form-control-sm" onchange="window.__busy=true;setTimeout(()=>{const s=document.getElementById('q');if(!window.__reset){window.__reset=true;s.value='0';}document.body.appendChild(document.createElement('i'));window.__busy=false},600)">`)
+    .replace("javascript:void(document.title='NEXT q='+document.getElementById('q').value)", "javascript:void(document.title=window.__busy?'COLLIDED':'NEXT q='+document.getElementById('q').value)");
+  const r = await run({ url: U.qty, html, directive: RUN({ qty: 2 }), wait: 6500 });
+  assert.equal(r.title, 'NEXT q=2', '重畫完才按、張數是重選過的');
+  assert.ok(r.calls.some((c) => c.type === 'log' && /重置/.test(c.payload.msg)));
+});
+
+test('座位/數量頁：張數一直被頁面重置、選不住 → 不按下一步，交給你', { skip }, async () => {
+  const html = qtyPage({ priceSelected: true }).replace('<select id="q" class="form-control form-control-sm">',
+    `<select id="q" class="form-control form-control-sm" onchange="setTimeout(()=>{document.getElementById('q').value='0';document.body.appendChild(document.createElement('i'))},300)">`);
+  const r = await run({ url: U.qty, html, directive: RUN({ qty: 2 }), wait: 12000 });
+  assert.equal(result(r).kind, 'fill-failed');
+  assert.equal(r.title.startsWith('NEXT'), false);
 });

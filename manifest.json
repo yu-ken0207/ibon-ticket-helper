@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ibon 訂票助手",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "description": "ibon 定時開頁、對時、依場次與票區關鍵字選票區與張數、勾同意約款並按下一步；驗證碼、排隊、付款一律由你自己處理。",
   "minimum_chrome_version": "111",
   "permissions": ["storage", "alarms", "notifications", "tabs"],

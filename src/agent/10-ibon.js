@@ -148,6 +148,20 @@
     || deepAll('a.btn.btn-primary.btn-block').find((b) => isVisible(b) && /下一步/.test(b.textContent)) || null;
   const qtyCaptcha = () => deepAll(QTY.captcha).find(isVisible) || null;
 
+  /**
+   * 點元素。href 是 javascript: 的連結（ibon 的「下一步」）在擴充功能的環境裡點會被擴充功能自己的 CSP 擋掉，
+   * 所以標記起來，請 MAIN world 的 alert-hook.js 在頁面自己的環境代點（跟你手動按一樣）。
+   * 它沒回應（沒載入）就不得已自己點。
+   */
+  function pageClick(el) {
+    const href = el.tagName === 'A' ? (el.getAttribute('href') || '') : '';
+    if (!/^\s*javascript:/i.test(href)) { el.click(); return; }
+    const token = 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    el.setAttribute('data-ith-click', token);
+    window.postMessage({ __ith: 'click', token }, location.origin);
+    setTimeout(() => { if (el.getAttribute('data-ith-click') === token) { el.removeAttribute('data-ith-click'); el.click(); } }, 500);
+  }
+
   /** 在下拉裡設值並通知網頁（ASP.NET 的 onchange 會跟著動） */
   function setSelect(sel, value) {
     sel.value = String(value);

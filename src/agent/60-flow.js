@@ -66,6 +66,26 @@
     return undefined;
   }
 
+  /**
+   * 等頁面安靜下來：選了張數、勾了同意之後，ibon 會在背景更新頁面（重算金額、重畫表格）。
+   * 更新到一半就按下一步，兩個請求撞在一起，ibon 會一直轉圈（2026-10-16 實測：選張數與按下一步只隔 4 毫秒就卡住）。
+   * 所以先等「連續 quietMs 毫秒沒有任何頁面變動」，最多等 maxMs；至少等 minMs，讓網頁的 change 事件有時間開始動作。
+   */
+  function settle(quietMs = 400, maxMs = 6000, minMs = 300) {
+    return new Promise((resolve) => {
+      const t0 = Date.now();
+      let last = Date.now();
+      const obs = new MutationObserver(() => { last = Date.now(); });
+      obs.observe(document.documentElement, { childList: true, subtree: true, attributes: true, characterData: true });
+      const tick = () => {
+        const t = Date.now();
+        if ((t - t0 >= minMs && t - last >= quietMs) || t - t0 >= maxMs) { obs.disconnect(); resolve(t - t0); return; }
+        setTimeout(tick, 50);
+      };
+      tick();
+    });
+  }
+
   /** 按下去之後等結果：網站用 alert 回報就接到；換頁成功時這個頁面已經卸載，由新頁面接手 */
   async function watchAfterClick(alertBefore, maxMs = 45000, label = '處理中') {
     const t0 = Date.now();
@@ -190,7 +210,7 @@
     const before = state.alerts.length;
     log(`場次「${sessionKey(cfg.sessionWhen)}」可以買了，按下「${info.button}」`);
     setStatus('按下線上購票…', 'ok');
-    btn.click();
+    pageClick(btn);
     const out = await watchAfterClick(before, 20000, '正在進入購票流程');
     if (out.kind === 'alert') return handleAlert(out, '按下線上購票');
     if (out.kind === 'timeout') return retry('fail', '按下線上購票後 20 秒頁面沒有反應');
@@ -222,7 +242,7 @@
     else log(`選中票區：${pick.text}`);
     const row = rows[pick.index];
     const before = state.alerts.length;
-    (row.querySelector('a[href], a[onclick]') || row).click();
+    pageClick(row.querySelector('a[href], a[onclick]') || row);
     const out = await watchAfterClick(before, 30000, '正在處理票區');
     if (out.kind === 'alert') return handleAlert(out, '選票區');
     if (out.kind === 'timeout') return finish(false, 'no-advance', '選了票區但等了 30 秒頁面沒有進到下一步，請自己看畫面', { handOff: true });
@@ -260,6 +280,21 @@
     if (Math.max(...have) < want) return finish(false, 'qty-limit', `你要 ${want} 張，但這個票區最多只能選 ${Math.max(...have)} 張。請自己決定要不要買`, { handOff: true });
     if (!setSelect(sel, want)) return finish(false, 'fill-failed', `張數選不到 ${want}`, { handOff: true });
     log(`已選張數 ${want}`);
+    // 等 ibon 的背景更新做完；更新後如果張數被重置了就再選一次（最多三輪）
+    let stable = false;
+    for (let i = 0; i < 3 && !stable; i++) {
+      await settle(500, 8000, 800);   // 至少等 0.8 秒：ibon 的背景更新不一定一變動就開始
+      if (state.aborted) return;
+      const cur = qtySelects()[0];
+      if (cur && Number(cur.value) === want) { stable = true; break; }
+      if (!cur || !setSelect(cur, want)) return finish(false, 'fill-failed', `張數被頁面重置，重選 ${want} 失敗，請自己選`, { handOff: true });
+      log(`頁面更新後張數被重置，重選 ${want}`, 'warn');
+    }
+    if (!stable) {
+      await settle(500, 8000, 800);
+      const cur = qtySelects()[0];
+      if (!cur || Number(cur.value) !== want) return finish(false, 'fill-failed', `張數一直被頁面重置，選不住 ${want}，請自己選`, { handOff: true });
+    }
     if (qtyCaptcha()) {
       handToUser(qtyCaptcha());
       return finish(false, 'captcha', '張數選好了。這一頁有驗證碼，請自己輸入後按下一步', { handOff: true });
@@ -267,7 +302,7 @@
     const next = qtyNext();
     if (!next) return finish(false, 'no-next', '找不到「下一步」按鈕，請自己按', { handOff: true });
     const before = state.alerts.length;
-    next.click();
+    pageClick(next);
     log('按下「下一步」');
     setStatus('已按下一步…', 'ok');
     const out = await watchAfterClick(before, 45000, '正在處理（可能在排隊或配位）');
@@ -289,12 +324,14 @@
       handToUser(agree);
       return finish(false, 'agree', '你設定不自動勾選同意。請自己閱讀後勾選並按下一步', { handOff: true });
     }
-    if (!agree.checked) agree.click();
+    if (!agree.checked) pageClick(agree);
     await sleep(150);
     if (!agree.checked) return finish(false, 'agree-failed', '同意條款勾不起來，請自己勾選', { handOff: true });
     log('已勾選同意約款');
+    await settle(500, 4000, 600);   // 勾選後 ibon 可能在背景更新頁面，等安靜了再按下一步
+    if (state.aborted) return;
     const before = state.alerts.length;
-    next.click();
+    pageClick(next);
     log('按下「下一步」');
     const out = await watchAfterClick(before, 45000, '正在處理');
     if (out.kind === 'alert') return handleAlert(out, '按下一步');
