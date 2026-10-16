@@ -65,6 +65,22 @@
     return 'selected';
   }
 
+  /** 等票區表穩定：列數 0.15 秒沒變，而且 DOMContentLoaded 之後至少 0.1 秒（最多等 1.5 秒）；回傳最新的列 */
+  async function waitAreaStable(rows) {
+    let n = rows.length;
+    let since = Date.now();
+    const t0 = Date.now();
+    while (Date.now() - t0 < 1500 && !state.aborted && !state.leaving) {
+      const ready = state.domReadyAt && Date.now() - state.domReadyAt >= 100;
+      if (ready && Date.now() - since >= 150) break;
+      await sleep(30);
+      const m = areaRows().length;
+      if (m !== n) { n = m; since = Date.now(); }
+    }
+    const now = areaRows();
+    return now.length ? now : rows;
+  }
+
   /** 選票區頁：照關鍵字、排除字選票區；之前售完過的票區（d.failedAreas）跳過 */
   async function runArea(cfg, d = {}) {
     setStatus('選票區中…', 'ok');
@@ -89,6 +105,10 @@
     }
     if (state.aborted || state.leaving) return;
     if (!rows.length) return finish(false, 'no-area-table', '票區頁一直沒有出現票區表格。可能是 ibon 改版了，請直接看畫面', { handOff: true });
+    // 票區表剛出現時 ibon 可能還沒掛上點擊處理（2026-10-16 活動 39978、夢想音樂節：載入後 0.43 秒就點，30 秒沒反應）：
+    // 等列數穩定 0.15 秒、而且 DOMContentLoaded 之後至少 0.1 秒再點（tickets_hunter 也是等列數連續兩次一樣才點）
+    rows = await waitAreaStable(rows);
+    if (state.aborted || state.leaving) return;
     const qty = Math.max(1, Math.min(Number(cfg.qty) || 1, 10));
     const failed = d.failedAreas || [];
     const infos = rows.map((r) => areaInfo(r, qty)).map((x) => (isFailedArea(x.name, failed) ? { ...x, unavailable: true } : x));
@@ -113,13 +133,15 @@
       else if (!how) log('頁面有「自行選位」和「電腦配位」，但找不到可以點的電腦配位選項，照原本的方式選票區', 'warn');
     }
     const row = rows[pick.index];
-    const out = await clickAndWatch(row, 30000, '正在處理票區', pointClick);
+    // 三種點法：列中央那一點（tickets_hunter 的做法）、整列、票區名稱那一格
+    const out = await clickUntilReacts(row, 30000, '正在處理票區', [pointClick, (r) => { r.click(); return r; }, (r) => pointClick(areaCells(r)[1] || r)]);
     if (out.kind === 'alert') return handleAlert(out, '選票區', { areaText: infos[pick.index].name });
     if (out.kind === 'timeout') {
       const seatMap = /選擇座位|座位圖|請點選座位|請選擇您的座位|已選座位/.test(visibleText());
+      const how = `（點了 ${out.tries} 次，點了之後頁面${out.sentRequest ? '有' : '沒有'}送出請求）`;
       return finish(false, 'no-advance', seatMap
-        ? '點了票區之後 ibon 出現座位圖，要你自己點座位（助手不會替你選座位）。請直接在畫面上選'
-        : '選了票區但等了 30 秒頁面沒有進到下一步，請自己看畫面', { handOff: true });
+        ? `點了票區之後 ibon 出現座位圖，要你自己點座位（助手不會替你選座位）。請直接在畫面上選${how}`
+        : `選了票區但等了 30 秒頁面沒有進到下一步，請自己看畫面${how}`, { handOff: true });
     }
     return undefined;
   }

@@ -31,6 +31,8 @@
     running: false,
     alerts: [],           // MAIN world 的 alert-hook.js 轉來的網站訊息
     netStarts: [],        // 頁面自己還沒回來的網路請求的開始時間（alert-hook.js 轉來的）
+    netLastStart: 0,      // 頁面最後一個請求開始的時間
+    domReadyAt: 0,        // DOMContentLoaded 的時間
     leaving: false,       // 頁面開始離開了（按了換頁的東西）：舊頁面上的助手不要再動作
     panel: null,
     mode: null,
@@ -120,7 +122,11 @@
   window.addEventListener('message', (ev) => {
     if (ev.source !== window || ev.origin !== location.origin) return;
     const d = ev.data;
-    if (d && d.__ith === 'net' && Array.isArray(d.starts)) { state.netStarts = d.starts.filter(Number.isFinite); return; }
+    if (d && d.__ith === 'net' && Array.isArray(d.starts)) {
+      state.netStarts = d.starts.filter(Number.isFinite);
+      if (Number.isFinite(d.lastStart)) state.netLastStart = d.lastStart;
+      return;
+    }
     if (!d || d.__ith !== 'alert' || typeof d.msg !== 'string') return;
     const msg = d.msg.slice(0, 300);
     state.alerts.push(msg);
@@ -128,6 +134,10 @@
     if (d.kind === 'confirm' && d.caught) log(`ibon 詢問「${msg.slice(0, 60)}」，助手按了${d.answer ? '確定' : '否'}`, 'warn');
     else if (d.caught) log(`ibon 訊息：「${msg.slice(0, 80)}」`, 'warn');
   });
+
+  // 這支程式在 document_start 就載入，比 ibon 自己的程式早；記下 DOMContentLoaded 的時間，點票區前給 ibon 時間掛上點擊處理
+  document.addEventListener('DOMContentLoaded', () => { state.domReadyAt = Date.now(); }, { once: true });
+  if (document.readyState !== 'loading') state.domReadyAt = Date.now();
 
   // 按了換頁的東西（下一步、__doPostBack）：頁面開始離開時舊頁面還能操作一陣子，這段時間不要再動作
   window.addEventListener('beforeunload', () => { state.leaving = true; });

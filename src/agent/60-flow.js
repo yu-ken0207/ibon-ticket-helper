@@ -171,6 +171,36 @@
     }
   }
 
+  /**
+   * 按下去，沒反應就換個方式再按（同 kktix 助手「沒反應重按到 3 次」）。clickers 是幾種按法，依序用。
+   * 「沒反應」：按了 retryMs 內頁面沒開始換頁、沒送出任何請求、也沒跳訊息——多半是按得太早（ibon 還沒掛上點擊處理），
+   * 或按到的不是會動作的那一層。按了之後頁面有送出請求就當成有反應，繼續等，不再重按（免得重複送出）。
+   * 回傳 watchAfterClick 的結果，另外帶 tries（按了幾次）、sentRequest（按了之後有沒有送出請求）。
+   */
+  async function clickUntilReacts(el, maxMs, label, clickers, retryMs = 1200) {
+    const before = state.alerts.length;
+    const t0 = Date.now();
+    window.postMessage({ __ith: 'catch', ms: maxMs + 2000 }, location.origin);
+    try {
+      for (let i = 0; i < clickers.length; i++) {
+        const at = Date.now();
+        clickers[i](el);
+        const last = i === clickers.length - 1;
+        const out = await watchAfterClick(before, last ? Math.max(1000, maxMs - (Date.now() - t0)) : retryMs, label);
+        const sentRequest = state.netLastStart >= at;
+        if (out.kind !== 'timeout') return { ...out, tries: i + 1, sentRequest };
+        if (sentRequest || netBusy()) {
+          const rest = await watchAfterClick(before, Math.max(1000, maxMs - (Date.now() - t0)), label);
+          return { ...rest, tries: i + 1, sentRequest: true };
+        }
+        if (!last) log(`點了 ${(retryMs / 1000).toFixed(1)} 秒沒有反應（頁面沒換頁、也沒送出請求），換個方式再點一次（第 ${i + 2} 次）`, 'warn');
+      }
+      return { kind: 'timeout', tries: clickers.length, sentRequest: false };
+    } finally {
+      window.postMessage({ __ith: 'catch', ms: 0 }, location.origin);
+    }
+  }
+
   /* 售完的票區：記在背景程式的任務裡，回到選區頁時跳過，改選下一個（tickets_hunter 也是售完就回選區頁換別區）。 */
   const SOLD_OUT_MSG = /已售完|售完|選購一空|尚無票|額滿|已無票|No tickets available|Sold out/i;
 

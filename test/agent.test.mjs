@@ -61,6 +61,8 @@ async function run({ url, html, directive, extra = {}, wait = 1500, alertAfter =
   await page.route('**/*', (r) => {
     const u = r.request().url();
     // 假的「背景更新」請求：/__update?ms=600 延遲 ms 毫秒才回，模擬 ibon 選了張數後回伺服器更新
+    // /__hold：6 秒都不回，模擬「點了之後換頁、新頁面還在路上」，舊頁面留著讓測試檢查；之後中斷，免得瀏覽器關不掉
+    if (u.includes('__hold')) return new Promise((done) => setTimeout(() => done(r.abort().catch(() => {})), 2000));
     const m = u.match(/__update\?ms=(\d+)/);
     if (m) return new Promise((done) => setTimeout(() => done(r.fulfill({ status: 200, body: 'ok' })), Number(m[1])));
     if (u.startsWith('https://ticket.ibon.com.tw/ActivityInfo/Details') || u.startsWith('https://orders.ibon.com.tw/application')) {
@@ -326,4 +328,39 @@ test('黑盒子：連 Shadow DOM 的字一起記，並記下購票方式與票�
   assert.match(box.html, /票區列：<tr onclick="go\(\)">/);
   assert.match(box.html, /<input id="m1" type="radio" name="mode" checked>/);
   assert.doesNotMatch(box.html, /<body|ibon 訂票助手/);
+});
+
+// 2026-10-16 夢想音樂節（活動 39978 同樣）：票區表在封閉 Shadow DOM 裡，<tr id="票區代碼"> 沒有 onclick，
+// ibon 在 DOMContentLoaded 之後才用程式掛上點擊處理；助手載入後 0.43 秒就點，30 秒沒反應
+// 點到了：直接回報給測試（頁面接著換頁，換頁中讀不到頁面上的東西），然後換頁
+const LATE_BIND = (bindMs, onClick = "window.__bg('test-click', tr.id); location.href = '/__hold'") => `<div id="host"></div><script>
+  const root = document.getElementById('host').attachShadow({ mode: 'closed' });
+  root.innerHTML = '<table class="table"><thead><tr><th>顏色</th><th>票區</th><th>票價(NT$)</th><th>空位</th></tr></thead><tbody>'
+    + '<tr id="B0CDC082"><td><span class="color-tag"></span></td><td>超級搖滾座位區</td><td>3,999</td><td class="action"><span>熱賣中</span></td></tr>'
+    + '<tr id="B0CDC086"><td><span class="color-tag"></span></td><td>搖滾座位區</td><td>2,999</td><td class="action"><span>熱賣中</span></td></tr></tbody></table>';
+  window.__clicks = 0;
+  document.addEventListener('DOMContentLoaded', () => setTimeout(() => {
+    root.querySelectorAll('tbody tr').forEach((tr) => tr.addEventListener('click', () => { window.__clicks++; ${onClick}; }));
+  }, ${bindMs}));
+</script>`;
+
+const clicked = (r) => r.calls.filter((c) => c.type === 'test-click').map((c) => c.payload);
+
+test('票區頁：點擊處理在 DOMContentLoaded 後才掛上 → 等表格穩定再點，一次就成功', { skip }, async () => {
+  const r = await run({ url: U.area, html: LATE_BIND(0), directive: RUN({ keywords: ['超級搖滾'] }), wait: 1500 });
+  assert.deepEqual(clicked(r), ['B0CDC082']);
+  assert.ok(!r.calls.some((c) => c.type === 'log' && /換個方式再點一次/.test(c.payload.msg)), '一次就成功，沒有重點');
+});
+
+test('票區頁：點擊處理掛得很慢（0.9 秒）→ 第一次點沒反應，換個方式再點就成功', { skip }, async () => {
+  const r = await run({ url: U.area, html: LATE_BIND(900), directive: RUN({ keywords: ['超級搖滾'] }), wait: 3500 });
+  assert.deepEqual(clicked(r), ['B0CDC082']);
+  assert.ok(r.calls.some((c) => c.type === 'log' && /換個方式再點一次（第 2 次）/.test(c.payload.msg)));
+});
+
+test('票區頁：點了之後頁面有送出請求 → 當成有反應繼續等，不會重複點', { skip }, async () => {
+  const html = LATE_BIND(0, "fetch('/__update?ms=1800').then(() => { document.title = 'go:' + tr.id; })");
+  const r = await run({ url: U.area, html, directive: RUN({ keywords: ['超級搖滾'] }), wait: 3000 });
+  assert.equal(r.title, 'go:B0CDC082');
+  assert.equal(await r.page.evaluate(() => window.__clicks), 1);
 });

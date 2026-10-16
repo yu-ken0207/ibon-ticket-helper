@@ -32,6 +32,8 @@
     running: false,
     alerts: [],           // MAIN world 的 alert-hook.js 轉來的網站訊息
     netStarts: [],        // 頁面自己還沒回來的網路請求的開始時間（alert-hook.js 轉來的）
+    netLastStart: 0,      // 頁面最後一個請求開始的時間
+    domReadyAt: 0,        // DOMContentLoaded 的時間
     leaving: false,       // 頁面開始離開了（按了換頁的東西）：舊頁面上的助手不要再動作
     panel: null,
     mode: null,
@@ -121,7 +123,11 @@
   window.addEventListener('message', (ev) => {
     if (ev.source !== window || ev.origin !== location.origin) return;
     const d = ev.data;
-    if (d && d.__ith === 'net' && Array.isArray(d.starts)) { state.netStarts = d.starts.filter(Number.isFinite); return; }
+    if (d && d.__ith === 'net' && Array.isArray(d.starts)) {
+      state.netStarts = d.starts.filter(Number.isFinite);
+      if (Number.isFinite(d.lastStart)) state.netLastStart = d.lastStart;
+      return;
+    }
     if (!d || d.__ith !== 'alert' || typeof d.msg !== 'string') return;
     const msg = d.msg.slice(0, 300);
     state.alerts.push(msg);
@@ -129,6 +135,10 @@
     if (d.kind === 'confirm' && d.caught) log(`ibon 詢問「${msg.slice(0, 60)}」，助手按了${d.answer ? '確定' : '否'}`, 'warn');
     else if (d.caught) log(`ibon 訊息：「${msg.slice(0, 80)}」`, 'warn');
   });
+
+  // 這支程式在 document_start 就載入，比 ibon 自己的程式早；記下 DOMContentLoaded 的時間，點票區前給 ibon 時間掛上點擊處理
+  document.addEventListener('DOMContentLoaded', () => { state.domReadyAt = Date.now(); }, { once: true });
+  if (document.readyState !== 'loading') state.domReadyAt = Date.now();
 
   // 按了換頁的東西（下一步、__doPostBack）：頁面開始離開時舊頁面還能操作一陣子，這段時間不要再動作
   window.addEventListener('beforeunload', () => { state.leaving = true; });
@@ -1205,6 +1215,36 @@
     }
   }
 
+  /**
+   * 按下去，沒反應就換個方式再按（同 kktix 助手「沒反應重按到 3 次」）。clickers 是幾種按法，依序用。
+   * 「沒反應」：按了 retryMs 內頁面沒開始換頁、沒送出任何請求、也沒跳訊息——多半是按得太早（ibon 還沒掛上點擊處理），
+   * 或按到的不是會動作的那一層。按了之後頁面有送出請求就當成有反應，繼續等，不再重按（免得重複送出）。
+   * 回傳 watchAfterClick 的結果，另外帶 tries（按了幾次）、sentRequest（按了之後有沒有送出請求）。
+   */
+  async function clickUntilReacts(el, maxMs, label, clickers, retryMs = 1200) {
+    const before = state.alerts.length;
+    const t0 = Date.now();
+    window.postMessage({ __ith: 'catch', ms: maxMs + 2000 }, location.origin);
+    try {
+      for (let i = 0; i < clickers.length; i++) {
+        const at = Date.now();
+        clickers[i](el);
+        const last = i === clickers.length - 1;
+        const out = await watchAfterClick(before, last ? Math.max(1000, maxMs - (Date.now() - t0)) : retryMs, label);
+        const sentRequest = state.netLastStart >= at;
+        if (out.kind !== 'timeout') return { ...out, tries: i + 1, sentRequest };
+        if (sentRequest || netBusy()) {
+          const rest = await watchAfterClick(before, Math.max(1000, maxMs - (Date.now() - t0)), label);
+          return { ...rest, tries: i + 1, sentRequest: true };
+        }
+        if (!last) log(`點了 ${(retryMs / 1000).toFixed(1)} 秒沒有反應（頁面沒換頁、也沒送出請求），換個方式再點一次（第 ${i + 2} 次）`, 'warn');
+      }
+      return { kind: 'timeout', tries: clickers.length, sentRequest: false };
+    } finally {
+      window.postMessage({ __ith: 'catch', ms: 0 }, location.origin);
+    }
+  }
+
   /* 售完的票區：記在背景程式的任務裡，回到選區頁時跳過，改選下一個（tickets_hunter 也是售完就回選區頁換別區）。 */
   const SOLD_OUT_MSG = /已售完|售完|選購一空|尚無票|額滿|已無票|No tickets available|Sold out/i;
 
@@ -1471,6 +1511,22 @@
     return 'selected';
   }
 
+  /** 等票區表穩定：列數 0.15 秒沒變，而且 DOMContentLoaded 之後至少 0.1 秒（最多等 1.5 秒）；回傳最新的列 */
+  async function waitAreaStable(rows) {
+    let n = rows.length;
+    let since = Date.now();
+    const t0 = Date.now();
+    while (Date.now() - t0 < 1500 && !state.aborted && !state.leaving) {
+      const ready = state.domReadyAt && Date.now() - state.domReadyAt >= 100;
+      if (ready && Date.now() - since >= 150) break;
+      await sleep(30);
+      const m = areaRows().length;
+      if (m !== n) { n = m; since = Date.now(); }
+    }
+    const now = areaRows();
+    return now.length ? now : rows;
+  }
+
   /** 選票區頁：照關鍵字、排除字選票區；之前售完過的票區（d.failedAreas）跳過 */
   async function runArea(cfg, d = {}) {
     setStatus('選票區中…', 'ok');
@@ -1495,6 +1551,10 @@
     }
     if (state.aborted || state.leaving) return;
     if (!rows.length) return finish(false, 'no-area-table', '票區頁一直沒有出現票區表格。可能是 ibon 改版了，請直接看畫面', { handOff: true });
+    // 票區表剛出現時 ibon 可能還沒掛上點擊處理（2026-10-16 活動 39978、夢想音樂節：載入後 0.43 秒就點，30 秒沒反應）：
+    // 等列數穩定 0.15 秒、而且 DOMContentLoaded 之後至少 0.1 秒再點（tickets_hunter 也是等列數連續兩次一樣才點）
+    rows = await waitAreaStable(rows);
+    if (state.aborted || state.leaving) return;
     const qty = Math.max(1, Math.min(Number(cfg.qty) || 1, 10));
     const failed = d.failedAreas || [];
     const infos = rows.map((r) => areaInfo(r, qty)).map((x) => (isFailedArea(x.name, failed) ? { ...x, unavailable: true } : x));
@@ -1519,13 +1579,15 @@
       else if (!how) log('頁面有「自行選位」和「電腦配位」，但找不到可以點的電腦配位選項，照原本的方式選票區', 'warn');
     }
     const row = rows[pick.index];
-    const out = await clickAndWatch(row, 30000, '正在處理票區', pointClick);
+    // 三種點法：列中央那一點（tickets_hunter 的做法）、整列、票區名稱那一格
+    const out = await clickUntilReacts(row, 30000, '正在處理票區', [pointClick, (r) => { r.click(); return r; }, (r) => pointClick(areaCells(r)[1] || r)]);
     if (out.kind === 'alert') return handleAlert(out, '選票區', { areaText: infos[pick.index].name });
     if (out.kind === 'timeout') {
       const seatMap = /選擇座位|座位圖|請點選座位|請選擇您的座位|已選座位/.test(visibleText());
+      const how = `（點了 ${out.tries} 次，點了之後頁面${out.sentRequest ? '有' : '沒有'}送出請求）`;
       return finish(false, 'no-advance', seatMap
-        ? '點了票區之後 ibon 出現座位圖，要你自己點座位（助手不會替你選座位）。請直接在畫面上選'
-        : '選了票區但等了 30 秒頁面沒有進到下一步，請自己看畫面', { handOff: true });
+        ? `點了票區之後 ibon 出現座位圖，要你自己點座位（助手不會替你選座位）。請直接在畫面上選${how}`
+        : `選了票區但等了 30 秒頁面沒有進到下一步，請自己看畫面${how}`, { handOff: true });
     }
     return undefined;
   }

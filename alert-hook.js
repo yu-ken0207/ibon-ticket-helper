@@ -46,10 +46,11 @@
    */
   const active = new Map();   // 請求 → 開始時間
   let seq = 0;
+  let lastStart = 0;          // 最後一個請求是什麼時候開始的（點了之後頁面有沒有送出請求，用來判斷有沒有反應）
   const reportNet = () => {
-    try { window.postMessage({ __ith: 'net', starts: [...active.values()].slice(-20), at: Date.now() }, location.origin); } catch (_) { /* 轉不出去就算了 */ }
+    try { window.postMessage({ __ith: 'net', starts: [...active.values()].slice(-20), lastStart, at: Date.now() }, location.origin); } catch (_) { /* 轉不出去就算了 */ }
   };
-  const begin = () => { const id = ++seq; active.set(id, Date.now()); reportNet(); return id; };
+  const begin = () => { const id = ++seq; lastStart = Date.now(); active.set(id, lastStart); reportNet(); return id; };
   const end = (id) => { if (active.delete(id)) reportNet(); };
   const origSend = XMLHttpRequest.prototype.send;
   XMLHttpRequest.prototype.send = function () {
