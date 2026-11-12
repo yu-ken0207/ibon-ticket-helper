@@ -60,3 +60,49 @@ test('表單檢查：沒場次、沒關鍵字（也沒開遞補）不開跑', ()
 test('清單：逗號、頓號、換行都能分', () => {
   assert.deepEqual(parseList('輪椅\n身障, 愛心、障礙'), ['輪椅', '身障', '愛心', '障礙']);
 });
+
+import { extractAnswer } from '../../lib/areas.js';
+
+test('驗證問題答案截取：末N碼／前N碼；支援中文數字；沒匹配到就整段', () => {
+  // 末 N 碼
+  assert.equal(extractAnswer('0912345678', '請輸入手機末 3 碼'), '678');
+  assert.equal(extractAnswer('0912345678', '請輸入手機末三碼'), '678');
+  assert.equal(extractAnswer('0912345678', '請輸入手機最後3碼'), '678');
+  assert.equal(extractAnswer('0912345678', '請輸入手機後3碼'), '678');
+  assert.equal(extractAnswer('0912345678', '請輸入手機末3位'), '678');
+  // 前 N 碼
+  assert.equal(extractAnswer('A123456789', '請輸入身分證前 4 碼'), 'A123');
+  assert.equal(extractAnswer('A123456789', '請輸入身分證首4碼'), 'A123');
+  assert.equal(extractAnswer('A123456789', '請輸入身分證前4位'), 'A123');
+  // 沒指示：整段
+  assert.equal(extractAnswer('1234567890', '請輸入會員編號'), '1234567890');
+  // 答案不夠長：取現有長度
+  assert.equal(extractAnswer('AB', '請輸入末 5 碼'), 'AB');
+  // 空答案
+  assert.equal(extractAnswer('', '請輸入手機末 3 碼'), '');
+  assert.equal(extractAnswer(null, '請輸入會員編號'), '');
+});
+
+test('關鍵字比對：票價千分位逗號兩邊都正規化（6980 ↔ 6,980 都能對）', () => {
+  const opts = [
+    { text: 'VIP 6,980' },
+    { text: 'A 6,380' },
+    { text: '2F 5,980' },
+    { text: '4F 4,980' },
+  ];
+  // 使用者填不帶逗號：ibon 顯示帶逗號也能對到
+  assert.equal(pickOption(opts, { keywords: 'VIP 6980' }).text, 'VIP 6,980');
+  assert.equal(pickOption(opts, { keywords: '6380' }).text, 'A 6,380');
+  assert.equal(pickOption(opts, { keywords: '4980' }).text, '4F 4,980');
+  // 使用者填帶逗號：ibon 顯示不帶逗號也能對到
+  const opts2 = [{ text: '鐵粉席 5880' }, { text: '一般席 350' }];
+  assert.equal(pickOption(opts2, { keywords: '5,880' }).text, '鐵粉席 5880');
+  // 多層千分位：1,234,567 → 1234567
+  const opts3 = [{ text: '金卡 1,234,567' }];
+  assert.equal(pickOption(opts3, { keywords: '1234567' }).text, '金卡 1,234,567');
+  // 全形逗號也處理
+  const opts4 = [{ text: 'A 6，380' }];
+  assert.equal(pickOption(opts4, { keywords: '6380' }).text, 'A 6，380');
+  // 排除字含數字時也走同一套正規化（這條目前不太會真的發生，但保險起見）
+  assert.equal(pickOption([{ text: 'VIP 6,980' }], { keywords: 'VIP', exclude: '6980' }).kind, 'blocked');
+});

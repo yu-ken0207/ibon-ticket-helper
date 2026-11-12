@@ -1,32 +1,64 @@
 {
   "manifest_version": 3,
   "name": "ibon 訂票助手",
-  "version": "0.9.7",
-  "description": "ibon 定時開頁、對時、依場次與票區關鍵字選票區與張數、勾同意約款並按下一步；驗證碼、排隊、付款一律由你自己處理。",
+  "version": "0.9.8",
+  "description": "ibon 定時開頁、對時、依場次與票區關鍵字選票區與張數、勾同意約款、填會員優先購代碼並按下一步；驗證碼、排隊、付款一律由你自己處理。",
   "minimum_chrome_version": "111",
-  "permissions": ["storage", "alarms", "notifications", "tabs"],
-  "host_permissions": ["https://ticket.ibon.com.tw/*", "https://orders.ibon.com.tw/*"],
-  "background": { "service_worker": "background.js", "type": "module" },
+  "permissions": [
+    "storage",
+    "alarms",
+    "notifications",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://ticket.ibon.com.tw/*",
+    "https://orders.ibon.com.tw/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
   "action": {
     "default_popup": "popup.html",
     "default_title": "ibon 訂票助手",
-    "default_icon": { "16": "icons/icon16.png", "32": "icons/icon32.png" }
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png"
+    }
   },
   "content_scripts": [
     {
-      "matches": ["https://ticket.ibon.com.tw/ActivityInfo/Details/*", "https://orders.ibon.com.tw/application/UTK02/*"],
-      "js": ["alert-hook.js"],
+      "matches": [
+        "https://ticket.ibon.com.tw/ActivityInfo/Details/*",
+        "https://orders.ibon.com.tw/application/UTK02/*",
+        "https://ticket.ibon.com.tw/Vaildate/*",
+        "https://ticket.ibon.com.tw/vaildate/*"
+      ],
+      "js": [
+        "alert-hook.js"
+      ],
       "run_at": "document_start",
       "world": "MAIN",
       "all_frames": false
     },
     {
-      "matches": ["https://ticket.ibon.com.tw/ActivityInfo/Details/*", "https://orders.ibon.com.tw/application/UTK02/*"],
-      "js": ["page-agent.js"],
+      "matches": [
+        "https://ticket.ibon.com.tw/ActivityInfo/Details/*",
+        "https://orders.ibon.com.tw/application/UTK02/*",
+        "https://ticket.ibon.com.tw/Vaildate/*",
+        "https://ticket.ibon.com.tw/vaildate/*"
+      ],
+      "js": [
+        "page-agent.js"
+      ],
       "run_at": "document_start",
       "world": "ISOLATED",
       "all_frames": false
     }
   ],
-  "icons": { "16": "icons/icon16.png", "32": "icons/icon32.png", "128": "icons/icon128.png" }
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "128": "icons/icon128.png"
+  }
 }

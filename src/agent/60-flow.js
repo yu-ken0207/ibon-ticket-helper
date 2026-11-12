@@ -244,6 +244,7 @@
       const kind = pageKind();
       if (kind === 'event') await runEvent(cfg, d);
       else if (kind === 'verify') await runVerify(cfg);
+      else if (kind === 'card-validate') await runValidate(cfg);
       else if (kind === 'area') await runArea(cfg, d);
       else if (kind === 'qty') await runQty(cfg, d);
       else if (kind === 'buyer') await runBuyer(cfg);

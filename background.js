@@ -102,6 +102,8 @@ function normalizeCfg(raw) {
     exclude: r.exclude === undefined ? DEFAULTS.exclude.slice() : parseList(r.exclude),
     fallback: r.fallback === true,
     allowNonAdjacent: r.allowNonAdjacent === true,
+    memberCodes: String(r.memberCodes || '').trim(),   // 驗證問題頁的答案（優先購會員代碼、手機號碼、身分證等），一行一個；不會匯出
+    cardPrefix: String(r.cardPrefix || '').trim(),     // 持卡人優先購驗證頁要填的卡號前幾碼；不會匯出
   };
   cfg.regUrl = activityUrl(cfg.eventUrl);
   return cfg;
@@ -569,13 +571,6 @@ async function onOffTrack(tabId, kind, url) {
     const msg = 'ibon 要你重新登入。登入後回到活動頁';
     if (t.phase === 'armed') await onWarn(tabId, { kind: 'guest', msg: msg + '，助手會照常倒數' });
     else await onResult(tabId, { ok: false, kind: 'guest', url, handOff: true, msg: msg + '，在擴充功能按「立即執行」' });
-    return;
-  }
-  if (kind === 'card-validate') {
-    // 持卡人優先購：要你驗證卡片資格，助手不代填；驗證完進到購票流程，助手會接著動作
-    const msg = 'ibon 要你先驗證持卡人資格（優先購）。請自己完成，之後的步驟助手會接著做';
-    if (t.phase === 'armed') await onWarn(tabId, { kind: 'card-validate', msg });
-    else await onResult(tabId, { ok: false, kind: 'card-validate', url, handOff: true, msg });
     return;
   }
   await recoverTab(tabId, kind === 'home' ? 'ibon 把頁面導回首頁' : 'ibon 回了錯誤頁', 'navigate');

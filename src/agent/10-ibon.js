@@ -193,6 +193,46 @@
     } catch (_) { /* 加不了就算了，只是少了加速 */ }
   }
 
+  /* ───────────────────────── 驗證問題頁與持卡人優先購頁（選擇器照 tickets_hunter） ─────────────────────────
+   * 驗證問題頁（UTK0201_0.aspx?rn=）題目在 #content div.form-group 的 span 裡，欄位是同一個 form-group 的 input。
+   * 持卡人優先購頁（Vaildate/…）只有一個輸入欄，沒有題目。送出按鈕都是 #content a.btn。 */
+  const VERIFY_INPUT_SEL = '#content div.form-group input[type="text"], #content div.form-group input:not([type]), div.editor-box input[type="text"], div.editor-box input:not([type])';
+  const VERIFY_SUBMIT_SEL = '#content a.btn, div.editor-box a.btn';
+  const VERIFY_QUESTION_SEL = '#content div.form-group, div.editor-box';
+  const VALIDATE_INPUT_SEL = '#content input[type="text"]';
+  const VALIDATE_SUBMIT_SEL = '#content a.btn';
+
+  function verifyInputs() { return deepAll(VERIFY_INPUT_SEL).filter(isVisible); }
+  function verifySubmit() {
+    return deepAll(VERIFY_SUBMIT_SEL).find((b) => isVisible(b) && !/取消/.test(norm(b.textContent))) || null;
+  }
+  /** 讀每個 form-group 裡 span 的文字；回傳陣列（可能一個或多個題目） */
+  function verifyQuestions() {
+    const out = [];
+    for (const g of deepAll(VERIFY_QUESTION_SEL)) {
+      if (!g.querySelector('input')) continue;
+      const span = g.querySelector('span');
+      const t = norm((span || g).textContent || '');
+      if (t) out.push(t);
+    }
+    return out;
+  }
+  function validateInput() { return deepAll(VALIDATE_INPUT_SEL).find(isVisible) || null; }
+  function validateSubmit() { return deepAll(VALIDATE_SUBMIT_SEL).find((b) => isVisible(b) && !/取消/.test(norm(b.textContent))) || null; }
+
+  /** 把值寫進 input／textarea，繞過 React/Angular 等框架的受控表單攔截（tickets_hunter 的 CONST_NATIVE_INPUT_SETTER_JS）；回傳 true 表示設到了 */
+  function setNativeInputValue(el, value) {
+    try {
+      const proto = Object.getPrototypeOf(el);
+      const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+      if (desc && typeof desc.set === 'function') desc.set.call(el, value);
+      else el.value = value;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      return el.value === value;
+    } catch (_) { return false; }
+  }
+
   /** 在下拉裡設值並通知網頁（ASP.NET 的 onchange 會跟著動） */
   function setSelect(sel, value) {
     sel.value = String(value);

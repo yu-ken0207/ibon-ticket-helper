@@ -230,6 +230,7 @@
     if (u.hostname === ACTIVITY_HOST) {
       if (/^\/ActivityInfo\/Details\/\d+\/?$/.test(u.pathname)) return 'event';
       if (/^\/ActivityInfo\/GoTicketURL\/?$/i.test(u.pathname)) return 'transit';
+      if (/^\/vaildate\//i.test(u.pathname)) return 'card-validate';
       return 'other';
     }
     if (u.hostname === ORDERS_HOST) {
@@ -244,13 +245,12 @@
     return 'other';
   }
 
-  /** ibon 上不會自己恢復、助手也管不到的頁面：登入頁、持卡人優先購的驗證頁（ibon 網址自己拼成 Vaildate，tickets_hunter）、錯誤頁、首頁（被踢回首頁），其他回傳 null */
+  /** ibon 上不會自己恢復、助手也管不到的頁面：登入頁、錯誤頁、首頁（被踢回首頁），其他回傳 null */
   function offTrackKind(url) {
     let u;
     try { u = new URL(url); } catch (_) { return null; }
     if (u.hostname === 'huiwan.ibon.com.tw' && /UserLogin/i.test(u.pathname)) return 'sign-in';
     if (!isIbonHost(url)) return null;
-    if (u.hostname === ACTIVITY_HOST && /^\/vaildate\//i.test(u.pathname)) return 'card-validate';
     if (/^\/(error|500|404)/i.test(u.pathname)) return 'error-page';
     // 被踢回首頁（tickets_hunter 認的兩個網址）：kktix 助手也會把分頁帶回去
     if (u.hostname === ACTIVITY_HOST && /^\/(index\/entertainment)?\/?$/i.test(u.pathname)) return 'home';
@@ -258,7 +258,7 @@
   }
 
   /** 購票流程的頁面（任務進行時助手要接手的那幾頁；verify 是通知你作答） */
-  const FLOW_KINDS = ['verify', 'area', 'qty', 'buyer'];
+  const FLOW_KINDS = ['verify', 'card-validate', 'area', 'qty', 'buyer'];
 
   /* ───── 內嵌 lib/areas.js ───── */
   // 場次與票區的比對。只處理文字，不碰網頁；頁面程式和背景程式共用。
@@ -268,7 +268,11 @@
   const DEFAULT_EXCLUDE = ['輪椅', '身障', '身心', '障礙', '愛心', 'Restricted View', '燈柱遮蔽', '視線不完整'];
 
   const nz = (s) => String(s == null ? '' : s).replace(/[\s　]+/g, ' ').trim();
-  const lc = (s) => nz(s).toLowerCase();
+  // 比對用的正規化：全小寫、把數字裡的千分位逗號拿掉（夢想音樂節顯示「5,880」、籃球賽顯示「6,980」）；
+  // 兩邊都走這一步，所以使用者填「6980」或「6,980」都能對到，ibon 顯示有逗號或沒逗號也都對。
+  // 全形逗號、數字之間的空格（例如「6 ,980」）也一起處理。
+  const unComma = (s) => String(s).replace(/(?<=\d)\s*[,，]\s*(?=\d)/g, '');
+  const lc = (s) => unComma(nz(s)).toLowerCase();
   const SOLD_OUT_RE = /已售完|售完|已額滿|額滿|暫無|無法購買|已截止|選購一空|尚無票/;
 
   /** 一行一個，也接受逗號、頓號分隔 */
@@ -332,6 +336,31 @@
       return '請至少填一組票區關鍵字，或勾選「關鍵字對不到就選第一個」。沒有關鍵字時不會自己亂選票區';
     }
     return null;
+  }
+
+  /*
+   * 驗證問題頁的擷取（同 tickets_hunter util.extract_answer_by_question_pattern）：
+   * 題目含「末N碼／後N碼／最後N碼／末N位」→ 從答案取後 N 個字；
+   * 「前N碼／首N碼／前N位」→ 從答案取前 N 個字；
+   * 中文數字（一～十）自動換成阿拉伯數字；對不到就回傳原答案。
+   */
+  const CN_TO_DIGIT = { 一: '1', 二: '2', 三: '3', 四: '4', 五: '5', 六: '6', 七: '7', 八: '8', 九: '9', 十: '10' };
+  // 「末3碼」、「末 3 碼」、「末3位」都要能對；tickets_hunter 的原版沒處理空格，我多加 \s* 容忍
+  const LAST_N = [/末\s*(\d+)\s*碼/, /後\s*(\d+)\s*碼/, /最後\s*(\d+)\s*碼/, /末\s*(\d+)\s*位/];
+  const FIRST_N = [/前\s*(\d+)\s*碼/, /首\s*(\d+)\s*碼/, /前\s*(\d+)\s*位/];
+  function extractAnswer(answer, questionText) {
+    const a = String(answer == null ? '' : answer);
+    if (!a) return '';
+    const q = String(questionText == null ? '' : questionText).replace(/[一二三四五六七八九十]/g, (c) => CN_TO_DIGIT[c] || c);
+    for (const re of LAST_N) {
+      const m = q.match(re);
+      if (m) { const n = Math.min(Number(m[1]), a.length); return a.slice(-n); }
+    }
+    for (const re of FIRST_N) {
+      const m = q.match(re);
+      if (m) { const n = Math.min(Number(m[1]), a.length); return a.slice(0, n); }
+    }
+    return a;
   }
 
   /* ───── 內嵌 lib/clock.js ───── */
@@ -806,6 +835,46 @@
         head.appendChild(l);
       }
     } catch (_) { /* 加不了就算了，只是少了加速 */ }
+  }
+
+  /* ───────────────────────── 驗證問題頁與持卡人優先購頁（選擇器照 tickets_hunter） ─────────────────────────
+   * 驗證問題頁（UTK0201_0.aspx?rn=）題目在 #content div.form-group 的 span 裡，欄位是同一個 form-group 的 input。
+   * 持卡人優先購頁（Vaildate/…）只有一個輸入欄，沒有題目。送出按鈕都是 #content a.btn。 */
+  const VERIFY_INPUT_SEL = '#content div.form-group input[type="text"], #content div.form-group input:not([type]), div.editor-box input[type="text"], div.editor-box input:not([type])';
+  const VERIFY_SUBMIT_SEL = '#content a.btn, div.editor-box a.btn';
+  const VERIFY_QUESTION_SEL = '#content div.form-group, div.editor-box';
+  const VALIDATE_INPUT_SEL = '#content input[type="text"]';
+  const VALIDATE_SUBMIT_SEL = '#content a.btn';
+
+  function verifyInputs() { return deepAll(VERIFY_INPUT_SEL).filter(isVisible); }
+  function verifySubmit() {
+    return deepAll(VERIFY_SUBMIT_SEL).find((b) => isVisible(b) && !/取消/.test(norm(b.textContent))) || null;
+  }
+  /** 讀每個 form-group 裡 span 的文字；回傳陣列（可能一個或多個題目） */
+  function verifyQuestions() {
+    const out = [];
+    for (const g of deepAll(VERIFY_QUESTION_SEL)) {
+      if (!g.querySelector('input')) continue;
+      const span = g.querySelector('span');
+      const t = norm((span || g).textContent || '');
+      if (t) out.push(t);
+    }
+    return out;
+  }
+  function validateInput() { return deepAll(VALIDATE_INPUT_SEL).find(isVisible) || null; }
+  function validateSubmit() { return deepAll(VALIDATE_SUBMIT_SEL).find((b) => isVisible(b) && !/取消/.test(norm(b.textContent))) || null; }
+
+  /** 把值寫進 input／textarea，繞過 React/Angular 等框架的受控表單攔截（tickets_hunter 的 CONST_NATIVE_INPUT_SETTER_JS）；回傳 true 表示設到了 */
+  function setNativeInputValue(el, value) {
+    try {
+      const proto = Object.getPrototypeOf(el);
+      const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+      if (desc && typeof desc.set === 'function') desc.set.call(el, value);
+      else el.value = value;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      return el.value === value;
+    } catch (_) { return false; }
   }
 
   /** 在下拉裡設值並通知網頁（ASP.NET 的 onchange 會跟著動） */
@@ -1288,6 +1357,7 @@
       const kind = pageKind();
       if (kind === 'event') await runEvent(cfg, d);
       else if (kind === 'verify') await runVerify(cfg);
+      else if (kind === 'card-validate') await runValidate(cfg);
       else if (kind === 'area') await runArea(cfg, d);
       else if (kind === 'qty') await runQty(cfg, d);
       else if (kind === 'buyer') await runBuyer(cfg);
@@ -1437,12 +1507,57 @@
   }
 
   /* ───────────────────────── 驗證問題頁（UTK0201_0.aspx?rn=…） ─────────────────────────
-   * 有些活動要先回答驗證問題（例如會員資格）。助手不代答，通知你作答；你送出後進到下一頁，助手接著動作。 */
-
-  async function runVerify() {
-    const input = deepAll('#content input[type="text"], #content input:not([type]), div.editor-box input[type="text"]').find(isVisible);
-    if (input) handToUser(input);
-    return finish(false, 'verify', 'ibon 要你先回答驗證問題。請自己作答並送出，之後的步驟助手會接著做', { handOff: true });
+   * 有些活動要先填會員優先購代碼、身分證末幾碼之類的題目。cfg.memberCodes 是你在設定裡填的一列答案（一行一個）。
+   * 做法照 tickets_hunter nodriver_ibon_verification_question：
+   *   題目在 #content div.form-group 的 span 裡；欄位是同一個 form-group 的 input；送出按鈕是 #content a.btn。
+   *   單題：題目有「末N碼／前N碼」就從答案裡截取；一組答案就填那一個。
+   *   多題：answer[i] 對 question[i]，各自依題目截取。
+   * 沒答案或答案不夠就不填、通知你接手。送出後靠 clickUntilReacts 等反應，不會重複送。
+   */
+  async function runVerify(cfg) {
+    setStatus('驗證問題頁…', 'ok');
+    await waitFor(() => verifyInputs().length && verifySubmit(), 10000);
+    if (state.aborted || state.leaving) return;
+    const inputs = verifyInputs();
+    const submit = verifySubmit();
+    if (!inputs.length || !submit) return finish(false, 'verify', 'ibon 要你先回答驗證問題。請自己作答並送出，之後的步驟助手會接著做', { handOff: true });
+    const questions = verifyQuestions();
+    const codes = parseList(cfg.memberCodes || '');
+    if (!codes.length) {
+      handToUser(inputs[0]);
+      return finish(false, 'verify', 'ibon 要你先回答驗證問題。你還沒設定「會員代碼／優先購號碼」，請自己作答並送出', { handOff: true });
+    }
+    // 多題但你填的不夠：停下來提示，不要用第一組亂填（tickets_hunter 單題模式只填第一格，我覺得整張表單有一格空等於白填）
+    if (inputs.length > 1 && codes.length < inputs.length) {
+      handToUser(inputs[codes.length]);
+      return finish(false, 'verify', `ibon 要你回答 ${inputs.length} 題驗證問題，你設定的「會員代碼」只有 ${codes.length} 組。請自己補上並送出`, { handOff: true });
+    }
+    // 逐欄算要填的答案；多題時 codes[i] 對 inputs[i]，單題時試每個 code 找非空的
+    const answers = [];
+    for (let i = 0; i < inputs.length; i++) {
+      const q = questions[i] || questions[0] || '';
+      if (inputs.length > 1) { answers.push(extractAnswer(codes[i], q)); continue; }
+      let best = '';
+      for (const c of codes) { const v = extractAnswer(c, q); if (v) { best = v; break; } }
+      answers.push(best);
+    }
+    if (answers.some((a) => !a)) {
+      handToUser(inputs[0]);
+      return finish(false, 'verify', '驗證問題題目認不出，助手沒辦法決定要填哪個值。請自己作答並送出', { handOff: true });
+    }
+    for (let i = 0; i < inputs.length; i++) {
+      if (!setNativeInputValue(inputs[i], answers[i])) {
+        return finish(false, 'verify-fill', `驗證問題第 ${i + 1} 格填不進去（可能受控表單擋住），請自己作答`, { handOff: true });
+      }
+      log(`驗證問題第 ${i + 1} 格已填（${answers[i].length} 字）`);
+    }
+    await settle(150, 3000, 200);
+    if (state.aborted || state.leaving) return;
+    log(`按下「下一步」（${pageAge()}）`);
+    const out = await clickUntilReacts(submit, 30000, '正在驗證', [pageClick, (b) => b.click(), (b) => pointClick(b)]);
+    if (out.kind === 'alert') return handleAlert(out, '送出驗證答案');
+    if (out.kind === 'timeout') return finish(false, 'no-advance', '送出驗證答案後 30 秒頁面沒進到下一步，可能答案不對或 ibon 處理中，請自己看畫面', { handOff: true });
+    return undefined;
   }
   /* ───────────────────────── 選票區頁（UTK0201_000，第 2 步） ─────────────────────────
    * 2026-10-16 截圖：表格欄位「顏色、票區、票價(NT$)、空位」，空位寫「熱賣中」、「已售完」或剩下的張數。
@@ -1815,6 +1930,41 @@
     });
   }
 
+  /* ───────────────────────── 持卡人優先購驗證頁（ticket.ibon.com.tw/Vaildate/…） ─────────────────────────
+   * 做法照 tickets_hunter nodriver_ibon_card_vaildate：
+   *   填入 cfg.cardPrefix（信用卡前幾碼），沒設就填第一個 memberCodes。
+   *   欄位是 #content input[type=text]（Angular ngModel，所以要用 setNativeInputValue）；送出按鈕 #content a.btn。
+   *   已經填了值就不覆蓋；頁面重新畫出時也只送一次（送出後 beforeunload 會把 state.leaving 設起來，後面 clickUntilReacts 不會再點）。
+   */
+  async function runValidate(cfg) {
+    setStatus('持卡人優先購驗證頁…', 'ok');
+    await waitFor(() => validateInput() && validateSubmit(), 10000);
+    if (state.aborted || state.leaving) return;
+    const input = validateInput();
+    const submit = validateSubmit();
+    if (!input || !submit) return finish(false, 'card-validate', 'ibon 要你先驗證持卡人資格（優先購）。找不到輸入欄或送出按鈕，請自己完成', { handOff: true });
+    // 已經填好就不覆蓋（可能是你剛填、頁面重新渲染）
+    if (norm(input.value || '')) {
+      log('輸入欄已經有值，不覆蓋');
+    } else {
+      const prefix = String(cfg.cardPrefix || '').trim() || parseList(cfg.memberCodes || '')[0] || '';
+      if (!prefix) {
+        handToUser(input);
+        return finish(false, 'card-validate', 'ibon 要你先驗證持卡人資格（優先購）。你還沒設定「持卡人卡號前幾碼」或「會員代碼」，請自己填入並送出', { handOff: true });
+      }
+      if (!setNativeInputValue(input, prefix)) {
+        return finish(false, 'card-validate-fill', '驗證欄位填不進去（可能受控表單擋住），請自己填入並送出', { handOff: true });
+      }
+      log(`已填驗證欄位（${prefix.length} 字）`);
+    }
+    await settle(150, 3000, 200);
+    if (state.aborted || state.leaving) return;
+    log(`按下送出（${pageAge()}）`);
+    const out = await clickUntilReacts(submit, 30000, '正在驗證', [pageClick, (b) => b.click(), (b) => pointClick(b)]);
+    if (out.kind === 'alert') return handleAlert(out, '送出持卡人驗證');
+    if (out.kind === 'timeout') return finish(false, 'no-advance', '送出持卡人驗證後 30 秒頁面沒進到下一步，可能卡號不對或 ibon 處理中，請自己看畫面', { handOff: true });
+    return undefined;
+  }
   /* ───────────────────────── 健檢 ─────────────────────────
    * 檢查活動頁還是不是助手認得的樣子。不按任何東西，也不改任何欄位。
    * 每一項：ok 正常、warn 可能有問題、fail 開賣時一定會卡、skip 現在沒辦法檢查。

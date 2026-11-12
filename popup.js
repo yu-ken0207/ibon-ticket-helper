@@ -77,6 +77,8 @@ function readForm() {
     syncClock: $('syncClock').checked,
     autoAgree: $('autoAgree').checked,
     allowNonAdjacent: $('allowNonAdjacent').checked,
+    memberCodes: $('memberCodes').value,
+    cardPrefix: $('cardPrefix').value,
     exclude: v('exclude'),
     fallback: $('fallback').checked,
   };
@@ -114,6 +116,8 @@ function fillForm(c) {
   if (typeof c.syncClock === 'boolean') $('syncClock').checked = c.syncClock;
   if (typeof c.autoAgree === 'boolean') $('autoAgree').checked = c.autoAgree;
   if (typeof c.allowNonAdjacent === 'boolean') $('allowNonAdjacent').checked = c.allowNonAdjacent;
+  if (typeof c.memberCodes === 'string') $('memberCodes').value = c.memberCodes;
+  if (typeof c.cardPrefix === 'string') $('cardPrefix').value = c.cardPrefix;
   if (typeof c.fallback === 'boolean') $('fallback').checked = c.fallback;
 }
 
@@ -339,9 +343,12 @@ $('btnHealth').addEventListener('click', async () => {
 /** 匯出：任務、紀錄、黑盒子、ibon 活動頁程式版本存成一個 JSON 檔 */
 $('btnExport').addEventListener('click', async () => {
   const d = await chrome.storage.local.get(['task', 'logs', 'blackbox', 'ibonFingerprint', 'form']);
+  // 匯出時隱藏會員代碼、持卡人卡號；task.cfg 裡若有也同樣處理
+  const hide = (o) => (o ? { ...o, memberCodes: o.memberCodes ? '（已隱藏）' : '', cardPrefix: o.cardPrefix ? '（已隱藏）' : '' } : o);
+  const task = d.task ? { ...d.task, cfg: hide(d.task.cfg) } : null;
   const out = {
     exportedAt: new Date().toISOString(), version: chrome.runtime.getManifest().version, userAgent: navigator.userAgent,
-    task: d.task || null, form: d.form || null, logs: d.logs || [], blackbox: d.blackbox || [], ibonFingerprint: d.ibonFingerprint || null,
+    task, form: hide(d.form || null), logs: d.logs || [], blackbox: d.blackbox || [], ibonFingerprint: d.ibonFingerprint || null,
   };
   const url = URL.createObjectURL(new Blob([JSON.stringify(out, null, 1)], { type: 'application/json' }));
   const now = new Date();
@@ -360,7 +367,7 @@ $('btnClearLogs').addEventListener('click', async () => {
 });
 
 for (const id of ['eventUrl', 'sessionWhen', 'keywords', 'qty', 'openTime', 'preOpenSec',
-  'notOpenRetryMs', 'notOpenMaxRetries', 'failMaxRetries', 'syncClock', 'autoAgree', 'allowNonAdjacent', 'exclude', 'fallback']) {
+  'notOpenRetryMs', 'notOpenMaxRetries', 'failMaxRetries', 'syncClock', 'autoAgree', 'allowNonAdjacent', 'memberCodes', 'cardPrefix', 'exclude', 'fallback']) {
   $(id).addEventListener('input', saveSoon);
   $(id).addEventListener('change', saveSoon);
 }

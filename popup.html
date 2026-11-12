@@ -75,6 +75,14 @@
       <label class="check"><input id="autoAgree" type="checkbox" checked> 自動勾選「同意」約款</label>
     </div>
     <label class="check"><input id="allowNonAdjacent" type="checkbox"> 座位/數量頁有「接受不連號座位」時幫我勾選</label>
+    <label class="field">會員代碼／優先購號碼（選填，一行一個）
+      <textarea id="memberCodes" rows="2" placeholder="例如 10 碼會員編號；驗證問題頁有「末3碼」會自動截取" spellcheck="false" autocomplete="off"></textarea>
+    </label>
+    <p class="hint">會員優先購的驗證問題頁出現時，助手會拿這些值回答。題目含「末N碼／前N碼」會自動截取。多題時，上面的對第 1 格、下面的對第 2 格，依此類推。</p>
+    <label class="field">持卡人卡號前幾碼（選填）
+      <input id="cardPrefix" type="text" autocomplete="off" spellcheck="false" placeholder="例如信用卡前 6 碼">
+    </label>
+    <p class="hint">持卡人優先購驗證頁（ticket.ibon.com.tw/Vaildate/…）助手會填這個；沒填就用上面「會員代碼」的第一組。<strong>助手只把你填的值送出，不會記到擴充功能以外的地方；匯出紀錄時這兩格會隱藏。</strong></p>
   </details>
 
   <div class="buttons">

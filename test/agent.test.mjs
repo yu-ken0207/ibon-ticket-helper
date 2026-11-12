@@ -25,9 +25,11 @@ const BUYER = fs.readFileSync(path.join(ROOT, 'test/fixtures/ibon-buyer-info.htm
 
 const U = {
   event: 'https://ticket.ibon.com.tw/ActivityInfo/Details/39998',
+  verify: 'https://orders.ibon.com.tw/application/UTK02/UTK0201_0.aspx?rn=123&PERFORMANCE_ID=1&PRODUCT_ID=2&SHOW_PLACE_MAP=True',
   area: 'https://orders.ibon.com.tw/application/UTK02/UTK0201_000.aspx?PERFORMANCE_ID=1',
   qty: 'https://orders.ibon.com.tw/application/UTK02/UTK0202_.aspx?PERFORMANCE_ID=1&GROUP_ID=2&PERFORMANCE_PRICE_AREA_ID=3',
   buyer: 'https://orders.ibon.com.tw/application/UTK02/UTK0206_.aspx',
+  validate: 'https://ticket.ibon.com.tw/Vaildate/B01/B02/B03',
 };
 
 const AREA = `<table><thead><tr><th>顏色</th><th>票區</th><th>票價(NT$)</th><th>空位</th></tr></thead><tbody>
@@ -65,7 +67,9 @@ async function run({ url, html, directive, extra = {}, wait = 1500, alertAfter =
     if (u.includes('__hold')) return new Promise((done) => setTimeout(() => done(r.abort().catch(() => {})), 2000));
     const m = u.match(/__update\?ms=(\d+)/);
     if (m) return new Promise((done) => setTimeout(() => done(r.fulfill({ status: 200, body: 'ok' })), Number(m[1])));
-    if (u.startsWith('https://ticket.ibon.com.tw/ActivityInfo/Details') || u.startsWith('https://orders.ibon.com.tw/application')) {
+    if (u.startsWith('https://ticket.ibon.com.tw/ActivityInfo/Details')
+        || u.startsWith('https://ticket.ibon.com.tw/Vaildate/')
+        || u.startsWith('https://orders.ibon.com.tw/application')) {
       return r.fulfill({ contentType: 'text/html; charset=utf-8', body: html });
     }
     return r.fulfill({ status: 204, body: '' });
@@ -363,4 +367,63 @@ test('票區頁：點了之後頁面有送出請求 → 當成有反應繼續等
   const r = await run({ url: U.area, html, directive: RUN({ keywords: ['超級搖滾'] }), wait: 3000 });
   assert.equal(r.title, 'go:B0CDC082');
   assert.equal(await r.page.evaluate(() => window.__clicks), 1);
+});
+
+
+// 驗證問題頁（tickets_hunter: #content div.form-group > span 題目、input 欄位、#content a.btn 送出）
+const VERIFY_PAGE = (questions) => {
+  const groups = questions.map((q, i) => `<div class="form-group"><span>${q}</span><input type="text" id="q${i}"></div>`).join('');
+  return `<section id="content">${groups}
+    <a class="btn" href="javascript:void(document.title='Q:'+[...document.querySelectorAll('#content input')].map((i) => i.value).join('|'))">下一步</a>
+  </section>`;
+};
+const VALIDATE_PAGE = `<section id="content">
+  <div><span>請輸入持卡人信用卡前 6 碼</span><input type="text" id="prefix"></div>
+  <a class="btn" href="javascript:void(document.title='V:'+document.getElementById('prefix').value)">送出</a>
+</section>`;
+
+test('驗證問題頁：單題，題目有「末3碼」→ 從會員代碼取後 3 碼填入，按送出', { skip }, async () => {
+  const r = await run({ url: U.verify, html: VERIFY_PAGE(['請輸入您的手機末 3 碼']), directive: RUN({ memberCodes: '0912345678' }), wait: 2000 });
+  assert.equal(r.title, 'Q:678');
+  assert.ok(r.calls.some((c) => c.type === 'log' && /第 1 格已填/.test(c.payload.msg)));
+});
+
+test('驗證問題頁：單題，題目沒有截取指示 → 整段填入', { skip }, async () => {
+  const r = await run({ url: U.verify, html: VERIFY_PAGE(['請輸入會員編號']), directive: RUN({ memberCodes: 'A12345\n0912345678' }), wait: 2000 });
+  assert.equal(r.title, 'Q:A12345');
+});
+
+test('驗證問題頁：兩題（會員編號、手機末 3 碼）→ 第一題填第 1 組、第二題從第 2 組取末 3 碼', { skip }, async () => {
+  const r = await run({ url: U.verify, html: VERIFY_PAGE(['請輸入會員編號', '請輸入手機末 3 碼']), directive: RUN({ memberCodes: 'A12345\n0912345678' }), wait: 2000 });
+  assert.equal(r.title, 'Q:A12345|678');
+});
+
+test('驗證問題頁：你沒設定會員代碼 → 停下、通知你接手，不動欄位', { skip }, async () => {
+  const r = await run({ url: U.verify, html: VERIFY_PAGE(['請輸入會員編號']), directive: RUN({}), wait: 1500 });
+  assert.equal(result(r).kind, 'verify');
+  assert.equal(result(r).handOff, true);
+  assert.equal(r.title, '');
+});
+
+test('驗證問題頁：兩題但你只填一組會員代碼 → 停下、通知你補', { skip }, async () => {
+  const r = await run({ url: U.verify, html: VERIFY_PAGE(['請輸入會員編號', '請輸入手機末 3 碼']), directive: RUN({ memberCodes: 'A12345' }), wait: 1500 });
+  assert.match(result(r).msg, /你設定的.*只有 1 組/);
+  assert.equal(r.title, '');
+});
+
+test('持卡人優先購驗證頁：填卡號前 6 碼，按送出', { skip }, async () => {
+  const r = await run({ url: U.validate, html: VALIDATE_PAGE, directive: RUN({ cardPrefix: '454321' }), wait: 2000 });
+  assert.equal(r.title, 'V:454321');
+});
+
+test('持卡人優先購驗證頁：沒設卡號前幾碼就用第一組會員代碼', { skip }, async () => {
+  const r = await run({ url: U.validate, html: VALIDATE_PAGE, directive: RUN({ memberCodes: '454321\nA123' }), wait: 2000 });
+  assert.equal(r.title, 'V:454321');
+});
+
+test('持卡人優先購驗證頁：兩個都沒設 → 停下、通知你接手', { skip }, async () => {
+  const r = await run({ url: U.validate, html: VALIDATE_PAGE, directive: RUN({}), wait: 1500 });
+  assert.equal(result(r).kind, 'card-validate');
+  assert.equal(result(r).handOff, true);
+  assert.equal(r.title, '');
 });
