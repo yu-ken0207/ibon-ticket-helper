@@ -18,7 +18,7 @@
 
   <div class="checkrow">
     <button id="btnRead" class="small" type="button">讀取活動</button>
-    <span class="hint">會在背景開一個分頁讀場次、開賣時間與票價，讀完自動關掉，不會買票</span>
+    <span class="hint">讀活動資訊，不會買票</span>
   </div>
   <p id="readMsg" class="hint" role="status"></p>
 
@@ -29,11 +29,11 @@
   <label class="field">票區關鍵字
     <textarea id="keywords" rows="3" placeholder="2F 一般席" spellcheck="false"></textarea>
   </label>
-  <p class="hint">一行一組，越上面越優先。同一行用空格隔開，代表每一段都要出現在票區名稱裡，例如「2F 一般席」。票區名稱要進購票流程才看得到。</p>
+  <p class="hint">一行一組，上面優先；同一行空格隔開＝每一段都要對到（例如「VIP 6980」）。</p>
   <div id="kwHints" class="kwhints"></div>
   <div class="checkrow">
     <button id="btnHealth" class="small" type="button">健檢</button>
-    <span class="hint">檢查 ibon 活動頁還是不是助手認得的樣子、有沒有改版，不會買票</span>
+    <span class="hint">檢查活動頁結構，不會買票</span>
   </div>
   <p id="healthMsg" class="hint" role="status"></p>
   <ul id="healthList" class="health"></ul>
@@ -102,7 +102,6 @@
     <ol id="logList" class="logs"></ol>
   </section>
 
-  <p class="foot">助手會自動選場次、票區、張數、勾同意並按下一步；驗證碼、排隊由你處理，最後的確認與付款一律由你自己做。依 ibon 售票服務客服中心 2026-10-16 的回覆，付款不得由程式代為處理，也不得規避驗證、排隊與購買數量限制。</p>
 </main>
 <script src="popup.js"></script>
 </body>
