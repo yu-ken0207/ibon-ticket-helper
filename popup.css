@@ -41,6 +41,13 @@ header h1 { margin: 0; font-size: 15px; }
 main { padding: 10px 14px 14px; }
 
 .field { display: block; margin: 8px 0 2px; font-weight: 600; }
+.field select {
+  display: block; width: 100%; max-width: 100%; margin-top: 4px; padding: 6px 8px;
+  font: inherit; font-weight: 400; color: var(--fg); background: var(--field);
+  border: 1px solid var(--line); border-radius: 6px; box-sizing: border-box;
+  text-overflow: ellipsis;   /* 關閉時場次名稱太長就用「…」收尾 */
+}
+.field select:focus { outline: 2px solid var(--brand); outline-offset: 0; }
 .field input, .field textarea {
   display: block; width: 100%; margin-top: 4px; padding: 6px 8px;
   font: inherit; font-weight: 400; color: var(--fg); background: var(--field);

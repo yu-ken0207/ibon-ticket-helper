@@ -98,8 +98,10 @@ function fillSessions(list, selected) {
   const sel = $('sessionWhen');
   const whens = sessionList.map((x) => x.when);
   if (selected && !whens.includes(selected)) whens.push(selected);
+  // 場次名稱可能很長（例如 NCT 演唱會），截到 24 字避免把下拉框撐寬
+  const trim = (s) => (s && s.length > 24 ? s.slice(0, 24) + '…' : s || '');
   sel.replaceChildren(el('option', { value: '' }, whens.length ? '（選一個場次）' : '先按「讀取活動」'),
-    ...whens.map((w) => { const x = sessionList.find((y) => y.when === w); return el('option', { value: w }, x ? `${w}　${x.name || ''}` : w); }));
+    ...whens.map((w) => { const x = sessionList.find((y) => y.when === w); const name = trim(x && x.name); return el('option', { value: w, title: x && x.name ? `${w}　${x.name}` : w }, name ? `${w}　${name}` : w); }));
   sel.value = selected && whens.includes(selected) ? selected : '';
 }
 
@@ -203,7 +205,7 @@ async function renderKeywordHints() {
     any = true;
   }
   if (!any && slug) {
-    box.append(el('div', { class: 'hint' }, '這個活動頁沒寫票區名稱。開賣後助手進到選票區頁會記下這場的票區，下次讀取這個活動就會出現在這裡。不確定的話，可以勾進階設定的「關鍵字都比對不到時，改選第一個還能買的票區」。'));
+    box.append(el('div', { class: 'hint' }, '沒有票區建議，助手還沒進過這場的購票頁。不確定可勾進階的「關鍵字對不到就選第一個」。'));
   }
 }
 
