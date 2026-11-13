@@ -1,226 +1,232 @@
-# ibon 訂票助手
+# ibon Ticket Helper
 
-Chrome 擴充功能（Manifest V3）。在 ibon 售票系統（ticket.ibon.com.tw）定時開頁、對時、依場次與票區關鍵字選票區與張數、勾同意約款並按下一步。驗證碼、排隊、付款一律由你自己處理；最後的確認與付款助手不碰。
+**English** | [繁體中文](README.zh-TW.md)
 
-結構與用法照 [kktix 訂票助手](../kktix-booking-helper/) 做：同一套排程、倒數、重試、健檢、黑盒子與紀錄。ibon 獨有的是「先讀活動頁、選場次」，因為 ibon 的活動頁有多個場次。
+A Chrome extension (Manifest V3) for the ibon ticketing site (ticket.ibon.com.tw). It opens the event page on time, syncs its clock with ibon's servers, picks the session, the ticket area and the number of tickets by your keywords, ticks the terms box and clicks Next. CAPTCHAs, queues and payment are always left to you; it never touches the final confirmation or payment.
 
-## 一、安裝
+It follows the same design as my KKTIX booking helper (not public): the same scheduling, countdown, retries, health check, black box and log. What is specific to ibon is reading the event page and choosing a session first, since one ibon event page can list several sessions.
 
-1. 開 `chrome://extensions`，打開右上角「開發人員模式」。
-2. 按「載入未封裝項目」，選這個資料夾。同時開著別的版本（舊的 ibon 助手、kktix 助手不衝突，但舊版 ibon 助手會衝突）要先停用。
-3. 改了程式之後，在 `chrome://extensions` 按這個助手的重新載入。已排程的任務會自動接上（見「4.3」）。
+## 1. Install
 
-## 二、使用
+1. Open `chrome://extensions` and switch on Developer mode (top right).
+2. Click "Load unpacked" and pick this folder. Disable any older version of this helper first; a KKTIX helper does not conflict.
+3. After changing the code, click this extension's reload button in `chrome://extensions`. Scheduled tasks are picked up again (see 4.3).
 
-1. 貼活動網址（`https://ticket.ibon.com.tw/ActivityInfo/Details/<數字>`）。
-2. 按「讀取活動」：在背景分頁讀場次、開賣時間與票價，讀完自動關掉。場次清單會填好；開賣時間只帶入**還沒到**的那一個（換場次時，那一場有自己的開賣時間就改用它；活動頁寫的是台灣時間，會換成這台電腦的時間）。
-3. 選場次。
-4. 填「票區關鍵字」（一行一組，越上面越優先，同一行用空格隔開表示每一段都要出現）。關鍵字欄下面會列出建議，點一下就加進去：
-   - 上次在購票頁看到的這個活動的票區（助手進到選票區頁、座位/數量頁時會記下來）
-   - 節目介紹寫的票價名稱
-   - 名稱含排除字的會標「排除」、不能點
-   第一次買、什麼都還沒記到時，可以勾「進階設定」裡的「關鍵字都比對不到時改選第一個還能買的票區」。
-5. 設張數（1～4，ibon 每筆交易限購 4 張）。
-6. 登入 ibon。
-7. 按「排程」。開賣前 90 秒助手會自己開活動頁並倒數；開賣時間到重新整理，場次的「線上購票」可以按就點，之後自動選票區、選張數、勾同意、按下一步。
-8. 遇到驗證碼、驗證問題、找不到票區、實名制等，助手會停下來通知你；你處理完進到下一頁，助手接著動作。
-9. 進到填購票資訊頁名額就保留了：助手通知「名額已保留」（帶 ibon 顯示的剩餘時間），接著勾同意、按下一步。
-10. 進到購票確認頁助手就停手。確認訂單與付款由你自己做。
+## 2. Use
 
-「立即執行」：馬上在活動頁找場次，能買就點進購票流程，不等開賣時間。
+1. Paste the event URL (`https://ticket.ibon.com.tw/ActivityInfo/Details/<number>`).
+2. Click "Read event". A background tab reads the sessions, sale time and prices, then closes. The session list is filled in. Only a sale time that is **still ahead** is filled in (when you switch sessions and that session has its own sale time, that one is used; the page shows Taiwan time, which is converted to this computer's time zone).
+3. Pick a session.
+4. Enter ticket area keywords: one set per line, higher lines first; words on one line separated by spaces must all appear. Suggestions appear under the box, click one to add it:
+   - areas of this event the helper saw on the purchase pages last time (it records them on the area page and the seat/quantity page)
+   - price names from the event description
+   - names containing an excluded word are marked "excluded" and cannot be added
+   For a first purchase, when nothing has been recorded yet, you can turn on "If no keyword matches, pick the first area still on sale" under Advanced.
+5. Set the number of tickets (1 to 4; ibon allows at most 4 per order).
+6. Log in to ibon.
+7. Click "Schedule". 90 seconds before the sale the helper opens the event page and counts down. At sale time it reloads; once the session's "Buy online" button can be clicked it clicks it, then picks the area and quantity, ticks the terms box and clicks Next.
+8. On a CAPTCHA, a verification question it cannot answer, no matching area, real-name registration and so on, the helper stops and tells you. Once you have dealt with it and reached the next page, it carries on.
+9. Reaching the buyer information page means your seats are held. The helper tells you ("seats held", with the time left that ibon shows), ticks the terms box and clicks Next.
+10. On the order confirmation page the helper stops. Confirming the order and paying are up to you.
 
-### 進階設定
+"Run now": looks for the session on the event page right away and, if it can be bought, starts the purchase without waiting for the sale time.
 
-| 項目 | 預設 | 說明 |
+### Advanced settings
+
+| Setting | Default | What it does |
 |---|---|---|
-| 提前開頁（秒） | 90 | 開賣前幾秒開頁 |
-| 與 ibon 伺服器對時 | 開 | 抓伺服器 Date 的跨秒瞬間，誤差約 20 毫秒 |
-| 還沒開賣時每幾毫秒重整 | 1000 | 到點後「線上購票」仍不能按時的重新整理間隔 |
-| 最多重整幾次 | 30 | 用完交給你 |
-| 排除這些字 | 輪椅、身障、身心、障礙、愛心、Restricted View、燈柱遮蔽、視線不完整 | 名稱含這些字的票區一律不選 |
-| 關鍵字對不到就選第一個 | 關 | 開了也一樣不選排除的票區 |
+| Open the page early (s) | 90 | How many seconds before the sale the page is opened |
+| Sync the clock with ibon | on | Catches the moment the server's Date header ticks to the next second; about 20 ms error |
+| Reload every (ms) before the sale opens | 1000 | Reload interval when "Buy online" still cannot be clicked after sale time |
+| Reload at most | 30 | Then it is handed to you |
+| Exclude these words | 輪椅, 身障, 身心, 障礙, 愛心, Restricted View, 燈柱遮蔽, 視線不完整 | Areas whose names contain these are never picked |
+| Pick the first area if no keyword matches | off | Excluded areas are still never picked |
+| Retries after the site refuses | 3 | When the site answers Next with an alert (sold out, for example) |
+| Tick the terms box | on | Off: the buyer information page waits for you |
+| Accept non-adjacent seats | off | Ticks "accept non-adjacent seats" on the seat/quantity page when it is there (selector from tickets_hunter) |
+| Member code / presale code | empty | One per line. On a verification question page they are filled in question order; "last N digits / first N digits" in the question is cut automatically. Stored in the settings, hidden in exported logs |
+| First digits of the card number | empty | Filled in on the cardholder presale page (`/Vaildate/…`); if empty, the first member code is used. Hidden in exported logs |
 
-**關鍵字比對小規則（0.9.8 起）**
-- 全不分大小寫。
-- 票價的千分位逗號會自動忽略：你填 `6980` 可對到 ibon 顯示的 `6,980`，反之亦然。全形逗號也一起處理。
-- 同一行用空格隔開，每一段都要出現在票區名稱裡。例如 `VIP 6980` 會對到「VIP 6,980 熱賣中」，但不會對到「A 6,380」。
-- 一行一組，越上面越優先。
-| 被網站拒絕後重來幾次 | 3 | 按下一步後網站用 alert 拒絕（例如已售完）時 |
-| 自動勾選「同意」約款 | 開 | 關掉的話填資料頁停下來等你 |
-| 接受不連號座位 | 關 | 座位/數量頁有「接受不連號座位」時幫你勾（tickets_hunter 的選擇器） |
-| 會員代碼／優先購號碼 | 空白 | 一行一個。驗證問題頁出現時，助手照題目順序填入；題目有「末N碼／前N碼」會自動截取。設定裡會存，匯出紀錄時會隱藏 |
-| 持卡人卡號前幾碼 | 空白 | 持卡人優先購驗證頁（`/Vaildate/…`）填這個；沒填就用上面「會員代碼」的第一組。匯出紀錄時會隱藏 |
+**Keyword matching (since 0.9.8)**
+- Case does not matter.
+- Thousands separators in prices are ignored: `6980` matches ibon's `6,980` and the other way round, full-width commas included.
+- Words on one line separated by spaces must all appear in the area name. `VIP 6980` matches "VIP 6,980 熱賣中" but not "A 6,380".
+- One set per line, higher lines first.
 
-## 三、它會做、不會做
+## 3. What it does and does not do
 
-依 ibon 售票服務客服中心 2026-10-16 的兩封回覆：
+Based on two written replies from the ibon ticketing customer service center (2026-10-16):
 
-- **允許**：自動讀取活動資訊、選場次、選票區、選張數、點下一步、勾同意約款、重新整理（不設秒數限制，但異常頻繁的請求會被系統防護機制處理，如 IP 阻斷，要符合人類正常操作邏輯）。限個人購票使用。
-- **不允許**：付款必須由本人親自操作；不得規避驗證機制、排隊機制、購買數量限制或其他安全措施；轉售、代購、跨實體販售不予允許。建議單一帳號只在單一裝置上操作。
+- **Allowed**: reading event information automatically, choosing the session, the area and the quantity, clicking Next, ticking the terms box, reloading (no fixed limit, but unusually frequent requests are handled by the site's protection, such as an IP block; it should follow normal human behaviour). For personal purchases only.
+- **Not allowed**: payment must be made by the buyer in person; verification, queues, purchase limits and other safety measures must not be bypassed; resale, buying on behalf of others and selling across entities are not allowed. One account on one device is recommended.
 
-助手做的事：
+What the helper does:
 
-| 階段 | 動作 |
+| Stage | Action |
 |---|---|
-| 開賣前 | 開活動頁、對時、檢查你選的場次、倒數 |
-| 活動頁 | 到點重新整理；你選的場次「線上購票」可以按就點一次；還不能按就照尚未開賣重試 |
-| 驗證問題頁（UTK0201_0，網址帶 rn=） | 照你填的「會員代碼」答題：單題照題目截取「末N碼／前N碼」填入；多題時按順序對應。沒設定或題數不夠就停下交給你 |
-| 持卡人優先購驗證頁（`ticket.ibon.com.tw/Vaildate/…`） | 填「持卡人卡號前幾碼」，沒設就填「會員代碼」的第一組 |
-| 選票區頁（UTK0201_000） | 照關鍵字、排除字選票區；跳過不能買的列（class 有 disabled）、剩的張數不夠的票區、圖例列、這次已經售完的票區；購票方式可以選「自行選位／電腦配位」時先選電腦配位；點票區照 tickets_hunter 點那一列正中央那一點；這一頁直接出現張數時，照座位/數量頁處理 |
-| 座位/數量頁（UTK0202_） | 選票區價格（多票區才有）、選張數、（有開的話）勾接受不連號，等 ibon 的背景更新做完再按下一步；有驗證碼就停手。這個票區賣完了（數量只有 0，或按下一步時 ibon 說售完）：記下來，同一頁還有別的票區就直接改選，沒有就回這次走過的選區頁換別區（照「被網站拒絕後重來幾次」的額度） |
-| 填購票資訊頁（UTK0206_） | 名額已保留，通知你；勾同意、按下一步；電話與 Email 是會員資料，ibon 已經帶好，不改；實名制交給你填；按下一步被網站擋下時不重新整理（免得弄丟名額），交給你 |
-| 購票確認頁（UTK0207_） | 只顯示「已保留名額」，不按任何東西（接著就是付款） |
+| Before the sale | Opens the event page, syncs the clock, checks your session, counts down |
+| Event page | Reloads at sale time; clicks your session's "Buy online" once it can be clicked; otherwise retries as not yet on sale |
+| Verification question (UTK0201_0, URL with rn=) | Answers with your member codes: one question, cut by "last N / first N digits"; several, in order. With no code set, or too few, it stops and hands over to you |
+| Cardholder presale page (`ticket.ibon.com.tw/Vaildate/…`) | Fills in the first digits of the card number, or the first member code if none is set |
+| Area page (UTK0201_000) | Picks the area by keywords and excluded words; skips rows that cannot be bought (class disabled), areas with too few seats left, legend rows and areas already sold out in this attempt; if the purchase method offers "computer-assigned seats" it picks that first; clicks the centre of the row, as tickets_hunter does; if the quantity appears on this page it is handled like the seat/quantity page |
+| Seat/quantity page (UTK0202_) | Picks the area price (only when there are several), the quantity and, if switched on, non-adjacent seats; waits for ibon's background update to finish before clicking Next; stops on a CAPTCHA. If the area is sold out (only 0 to choose, or ibon says so after Next) it notes that and picks another area on the same page, or goes back to the area page to pick another one (within the retry allowance) |
+| Buyer information page (UTK0206_) | The seats are held: tells you, ticks the terms box, clicks Next. Phone and email come from your ibon member data and are left alone; real-name details are left to you; if the site blocks Next it does not reload (so the seats are not lost) and hands over to you |
+| Order confirmation page (UTK0207_) | Only shows "seats held" and clicks nothing (payment comes next) |
 
-任務分頁被踢回 ibon 首頁時，助手把它帶回活動頁（同 kktix 助手）。
+If the task tab is sent back to the ibon home page, the helper takes it back to the event page (as the KKTIX helper does).
 
-助手**不做**的事：驗證碼、驗證問題、排隊、流量控管、機器人檢查（偵測到字樣就整頁不動，通知你）；「正在驗證您是否是人類」檢查頁（等它自己通過，這段時間不重新整理）；最後的確認；付款。
+What it **does not** do: CAPTCHAs, verification it cannot answer, queues, traffic control or bot checks (when it sees those words it leaves the whole page alone and tells you); the "verifying you are human" check page (it waits for it to pass and does not reload meanwhile); the final confirmation; payment.
 
-## 四、為什麼這樣寫
+## 4. Why it is built this way
 
-### 4.1 為什麼是 ISOLATED world，另外一支 MAIN world 的 alert-hook
+### 4.1 An ISOLATED-world page script, plus an alert hook in the MAIN world
 
-ibon 活動頁的場次表在封閉的 Shadow DOM 裡，只有擴充功能才有的 `chrome.dom.openOrClosedShadowRoot` 讀得到，所以頁面程式（`page-agent.js`）跑在 ISOLATED world，可以直接用 `chrome.runtime`，不需要 kktix 那樣的 bridge。
+The session table on ibon's event page lives in a closed Shadow DOM, which only `chrome.dom.openOrClosedShadowRoot` (an extension API) can read. So the page script (`page-agent.js`) runs in the ISOLATED world, where it can use `chrome.runtime` directly and needs no bridge.
 
-另有 `alert-hook.js` 跑在 MAIN world（頁面自己的環境），做兩件事：
+`alert-hook.js` runs in the MAIN world (the page's own context) and does two things:
 
-1. ibon 用 `alert()` 回報「已售完」之類的結果，ISOLATED world 接不到。它記下 alert / confirm 的文字，用 postMessage 轉給頁面程式。平常照原樣顯示對話框；只有頁面程式按下去、等結果的那幾秒才接管（同 kktix 助手）：alert 不跳出來（不然整個頁面會停住、要你按確定才繼續），文字寫進面板；confirm 訊息裡有「取消、不保留、放棄、刪除、清除」就按否，其他按確定。
-2. 代點 `href` 是 `javascript:` 的連結。ibon 的「下一步」是 `javascript:__doPostBack(...)`，在擴充功能的環境裡點會被擴充功能自己的 CSP 擋掉（見 4.7）。頁面程式把要點的元素標上一次性的記號，請它在頁面環境點，跟你手動按一樣。
+1. ibon reports results such as "sold out" with `alert()`, which the ISOLATED world cannot catch. The hook records the text of alerts and confirms and passes it on with postMessage. Normally dialogs show as usual; only for the few seconds while the page script waits for the result of a click does it take over: the alert is not shown (it would freeze the page until you click OK) and its text goes to the panel; a confirm containing "cancel, do not keep, give up, delete, clear" (in Chinese) is answered No, anything else Yes.
+2. It clicks links whose `href` is `javascript:`. ibon's Next is `javascript:__doPostBack(...)`, and clicking it from the extension's context is blocked by the extension's own CSP (see 4.7). The page script marks the element with a one-time tag and the hook clicks it in the page's context, just like a manual click.
 
-### 4.2 兩段式排程、對時與到點保險
+### 4.2 Two-stage scheduling, clock sync and a safety net
 
-同 kktix：`chrome.alarms` 精度不夠拿來「到點」，只負責提早（預設 90 秒）把活動頁開在獨立視窗；真正的到點由頁面裡的倒數處理。
+`chrome.alarms` is not precise enough to hit the sale time, so it only opens the event page early (90 seconds by default) in its own window; the countdown in the page handles the moment itself.
 
-- 對時：HTTP Date 只有秒精度，所以抓伺服器「跨秒」的那一瞬間，分兩段（每 140 毫秒探一次，再在預測的跨秒點附近每 20 毫秒同時送出探測）。請求網址是 `/assets/favicon.ico`（靜態檔，回的是 CDN 的時間）。網頁在背景時 Chrome 會拖慢計時，量不準時這次不採用。
-- 到點保險：開賣前 25 秒背景程式叫醒自己，開賣後 0.1 秒看頁面有沒有重新整理，沒有就由背景程式重新整理。
-- 到點後多等 30 毫秒（`fireOffsetMs`）才重新整理，吸收網路來回不對稱的誤差。
+- Clock sync: the HTTP Date header has only one-second resolution, so the helper catches the moment the server's second ticks over, in two stages (a probe every 140 ms, then probes every 20 ms around the predicted tick). It requests `/assets/favicon.ico` (a static file, so the time is the CDN's). Chrome slows timers in background tabs; a measurement taken that way is not used.
+- Safety net: 25 seconds before the sale the background script wakes itself up; 0.1 s after the sale it checks that the page has reloaded and reloads it itself if not.
+- It reloads 30 ms after the sale time (`fireOffsetMs`) to absorb uneven network delay.
 
-### 4.3 擴充功能重新載入
+### 4.3 Reloading the extension
 
-Chrome 重新載入擴充功能會清掉鬧鐘，原本開好的活動頁上的舊助手也會跟背景程式斷線。背景程式啟動時（`restoreAlarms`）會把還沒到的排程重新掛上、重新整理活動頁讓新版接手，開賣時間已過就取消任務。
+Reloading an extension clears its alarms, and the old page script on an open event page loses its connection to the background script. On start (`restoreAlarms`) the background script sets the pending schedules again and reloads the event page so the new version takes over; a task whose sale time has passed is cancelled.
 
-### 4.4 任務階段
+### 4.4 Task states
 
-`armed` 已排程等開賣 → `fired` 開賣時間到 → `running`（立即執行） → `waiting-user` 需要你接手（驗證碼、找不到票區…） → `done` 結束 → `cancelled` 已取消。
+`armed` scheduled, waiting for the sale; `fired` sale time reached; `running` (run now); `waiting-user` your turn (CAPTCHA, no matching area…); `done` finished; `cancelled`.
 
-`waiting-user` 之後你自己處理並進到下一頁，頁面報到時任務回到 `running`，助手接著動作。活動頁按「線上購票」若另開了分頁，任務會跟著搬到新分頁（看 `openerTabId`）。
+After `waiting-user`, once you have dealt with it and the next page reports in, the task goes back to `running` and the helper carries on. If "Buy online" opens a new tab, the task moves to it (by `openerTabId`).
 
-### 4.5 頁面結構的來源
+### 4.5 Where the page structure comes from
 
-| 頁面 | 來源 | 核對狀態 |
+| Page | Source | Checked |
 |---|---|---|
-| 活動頁場次表（`#GameInfoList .tr`，封閉 Shadow DOM） | 2026-10-15 真站（活動 39972）、2026-10-16 真站（活動 39998） | 已核對 |
-| 驗證問題頁（UTK0201_0.aspx?rn=） | 選擇器與擷取規則照 tickets_hunter `nodriver_ibon_verification_question` | 題目 `#content div.form-group span`、欄位 `#content div.form-group input`、送出 `#content a.btn`；截取規則「末N碼／前N碼」。真站結構沒直接看過 |
-| 持卡人優先購驗證頁（`/Vaildate/…`） | 選擇器照 tickets_hunter `nodriver_ibon_card_vaildate` | 欄位 `#content input[type=text]`、送出 `#content a.btn`；用原生 setter 設值通過 Angular ngModel。真站結構沒直接看過 |
-| 選票區頁（UTK0201_000） | 2026-10-16 截圖；tickets_hunter 的 `ibon.py` | 表格在封閉 Shadow DOM 裡，每列 4 格（顏色、票區、票價、空位），表頭在 THEAD，不能買的列 class 帶 disabled，「座位已被選擇」「座位已售出」「舞台區域」是圖例，點的是整列。0.9.2 實測點整列可以進到下一頁。沒有用結構快照核對過 |
-| 座位/數量頁（UTK0202_） | 2026-10-16 真站結構快照 | 已核對：`#ctl00_ContentPlaceHolder1_PRICE`、`#…_DataGrid` 裡的 `select.form-control-sm`、`#…_AddShopingCart` |
-| 填購票資訊頁（UTK0206_） | 2026-10-16 真站結構快照 | 已核對：`#agreen`、「下一步」連結；0.9.2 實測助手走得到這一頁 |
-| 購票確認頁（UTK0207_） | 網址取自 tickets_hunter（它也刻意不碰這一步，接著就是付款） | 2026-10-16 實測走得到這一頁；結構沒看過，只用網址判斷 |
+| Event page session table (`#GameInfoList .tr`, closed Shadow DOM) | The live site, 2026-10-15 (event 39972) and 2026-10-16 (event 39998) | Yes |
+| Verification question (UTK0201_0.aspx?rn=) | Selectors and cutting rules from tickets_hunter `nodriver_ibon_verification_question` | Question `#content div.form-group span`, field `#content div.form-group input`, submit `#content a.btn`; "last N / first N digits". Not seen on the live site |
+| Cardholder presale page (`/Vaildate/…`) | Selectors from tickets_hunter `nodriver_ibon_card_vaildate` | Field `#content input[type=text]`, submit `#content a.btn`; the value is set with the native setter so Angular's ngModel sees it. Not seen on the live site |
+| Area page (UTK0201_000) | A screenshot (2026-10-16) and tickets_hunter's `ibon.py` | The table is in a closed Shadow DOM, 4 cells per row (colour, area, price, seats left), header in THEAD, rows that cannot be bought have class disabled, "seat taken", "seat sold" and "stage" are legend rows, the whole row is clicked. Clicking the row reached the next page in a 0.9.2 test. Not checked against a structure snapshot |
+| Seat/quantity page (UTK0202_) | Live-site structure snapshot, 2026-10-16 | Yes: `#ctl00_ContentPlaceHolder1_PRICE`, `select.form-control-sm` in `#…_DataGrid`, `#…_AddShopingCart` |
+| Buyer information page (UTK0206_) | Live-site structure snapshot, 2026-10-16 | Yes: `#agreen` and the Next link; reached in a 0.9.2 test |
+| Order confirmation page (UTK0207_) | URL from tickets_hunter (which also leaves this step alone; payment comes next) | Reached in a 2026-10-16 test; recognised by URL only |
 
-如果助手在哪一頁沒動作，看紀錄匯出裡的黑盒子（頁面的文字與按鈕），再回來補。直接用程式讀 ibon 的購票頁會被擋（HTTP 403，回「正在驗證您是否是人類」），所以這些頁面的結構只能在你自己的 Chrome 裡看。
+If the helper does nothing on some page, look at the black box in the exported log (the page's text and buttons) and add what is missing. Reading ibon's purchase pages from a script is blocked (HTTP 403 with "verifying you are human"), so their structure can only be seen in your own Chrome.
 
-### 4.6 程式結構
+### 4.6 Code layout
 
 ```
 manifest.json
-background.js          任務狀態、排程、重試額度、通知、盯住分頁
-page-agent.js          ISOLATED world 的頁面程式（由 tools/build.mjs 從 src/agent/ 和 lib/ 產生，不要直接改）
-alert-hook.js          MAIN world，轉送網站的 alert
-popup.html/css/js      彈出視窗
-lib/urls.js            網址與頁面種類
-lib/areas.js           場次、票區的比對（關鍵字、排除字、遞補）
-lib/eventinfo.js       活動頁資訊的整理（場次狀態、票價、開賣時間、限購）
+background.js          task state, scheduling, retry allowance, notifications, watching the task tab
+page-agent.js          ISOLATED-world page script (built by tools/build.mjs from src/agent/ and lib/; do not edit)
+alert-hook.js          MAIN world: passes the site's alerts on
+popup.html/css/js      the popup
+lib/urls.js            URLs and page kinds
+lib/areas.js           matching sessions and areas (keywords, excluded words, fallback)
+lib/eventinfo.js       event page information (session state, prices, sale time, limits)
 lib/{format,backoff,clock,health,box}.js
-src/agent/             00-core 基礎與訊息、05-dom 找元素（含封閉 Shadow DOM）、10-ibon 活動頁讀取與共用動作、
-                       25-panel 畫面面板、30-clock 對時、60-flow 共用流程工具與分派、
-                       每一頁一個檔：61-countdown 活動頁倒數、62-event 活動頁點場次、63-verify 驗證問題頁、
-                       64-area 選票區頁、65-qty 座位/數量頁、66-buyer 填購票資訊頁、67-check 讀取活動、
-                       70-health 健檢、75-blackbox 黑盒子、90-boot 啟動
-tools/build.mjs        產生 page-agent.js
-tools/deploy.py        部署到各台機器
-test/                  單元測試、背景程式測試、頁面程式測試
+src/agent/             00-core basics and messages, 05-dom finding elements (closed Shadow DOM too),
+                       10-ibon reading the event page and shared actions, 25-panel the on-page panel,
+                       30-clock clock sync, 60-flow shared flow tools and dispatch,
+                       one file per page: 61-countdown, 62-event, 63-verify, 64-area, 65-qty, 66-buyer,
+                       67-check (read event), 68-validate; 70-health, 75-blackbox, 90-boot
+tools/build.mjs        builds page-agent.js
+tools/deploy.py        copies the extension to your machines
+test/                  unit, background script and page script tests
 ```
 
-### 4.7 實測踩過的坑（2026-10-16）
+### 4.7 Pitfalls found on the live site (2026-10-16)
 
-| 現象 | 原因 | 修法 |
+| What happened | Why | Fix |
 |---|---|---|
-| 倒數時活動頁每約 7 秒重新整理一次（0.9.0） | 活動頁是單頁應用，載入狀態會再變一次，但助手不會再報到；「盯住購票分頁」以為是 Chrome 的連線錯誤頁 | 重新載入前先問頁面上的助手還在不在（`ping`）（0.9.1） |
-| 按下一步後一直轉圈（0.9.1） | 「下一步」是 `javascript:` 連結，從擴充功能的環境點會被擴充功能自己的 CSP 擋掉（Chrome 主控台：Running the JavaScript URL violates the following Content Security Policy directive…）；而且選張數到按下一步只隔 4 毫秒，ibon 的背景更新可能還沒做完 | `javascript:` 連結由 alert-hook.js 在頁面環境代點；選了張數後等頁面安靜下來再按，張數被重置就重選（0.9.2 固定至少等 0.8 秒；0.9.5 改成看網路請求，見 4.8） |
-| 直接用程式讀購票頁回 403 | ibon 擋非瀏覽器的請求，回「正在驗證您是否是人類」檢查頁 | 不繞過。頁面程式看到這句話就等它自己通過，不重新整理（0.9.3） |
-| 點了票區 30 秒沒反應（0.9.5，活動 39978 演唱會） | 這場的購票方式是「自行選位　電腦配位」，上一場只有電腦配位；助手直接對 `<tr>` 呼叫 `click()`，ibon 若把點擊掛在列裡面的元素上就點不到（tickets_hunter 是在列中央的座標做滑鼠點擊）；也可能是預設自行選位、點了出現座位圖。黑盒子當時只記了頁面前 800 字、沒有 Shadow DOM，看不出是哪一個 | 點票區改成點列中央那一點上最裡層的元素；有「電腦配位」選項先選它；黑盒子改記連 Shadow DOM 在內的 2000 字，加上「購票方式」與票區列的結構骨架（0.9.6）。真正原因要等下一次的黑盒子確認 |
-| 0.9.6 還是點了票區 30 秒沒反應（夢想音樂節，只有電腦配位） | 0.9.6 的黑盒子記到結構：票區列是 `<tr id="票區代碼">`、**沒有 onclick**，點擊處理是 ibon 的程式另外掛上去的；助手在載入後 0.43 秒就點。助手在 document_start 就載入，DOMContentLoaded 一到它的程式會比 ibon 自己的初始化先跑，ibon 還沒掛上點擊處理就被點了（0.9.5 加速後更早點） | 票區表出現後等列數穩定 0.15 秒、DOMContentLoaded 之後至少 0.1 秒才點（tickets_hunter 也是等列數連續兩次一樣）；點了 1.2 秒內沒換頁、沒送出請求就換一種點法再點，最多 3 次，有送出請求就不重點（同 kktix 助手「沒反應重按到 3 次」）（0.9.7） |
+| The event page reloaded about every 7 s during the countdown (0.9.0) | The event page is a single-page app whose load state changes once more without the helper reporting in again; the tab watcher took it for a Chrome connection error page | Ask the helper on the page whether it is still there (`ping`) before reloading (0.9.1) |
+| Spinning forever after Next (0.9.1) | Next is a `javascript:` link, blocked by the extension's own CSP when clicked from the extension's context; and only 4 ms passed between choosing the quantity and clicking Next, before ibon's background update finished | `javascript:` links are clicked by alert-hook.js in the page context; after choosing the quantity it waits for the page to settle, and chooses again if the quantity was reset (0.9.2: at least 0.8 s; 0.9.5: watches network requests, see 4.8) |
+| Reading purchase pages from a script returns 403 | ibon blocks non-browser requests with a "verifying you are human" page | Not bypassed. When the page script sees that text it waits for the check to pass and does not reload (0.9.3) |
+| Clicking an area did nothing for 30 s (0.9.5, a concert) | This event offered "choose seats / computer-assigned"; the helper called `click()` on the `<tr>`, which misses a handler attached to an element inside the row (tickets_hunter clicks the row's centre); or the default was choosing seats and a seat map appeared. The black box kept only the first 800 characters without the Shadow DOM, so it could not tell which | Click the innermost element at the row's centre; pick "computer-assigned" first when offered; the black box keeps 2000 characters including the Shadow DOM, plus the purchase method and the shape of the area rows (0.9.6) |
+| Still nothing for 30 s after clicking an area (0.9.6, a festival with computer-assigned seats only) | The 0.9.6 black box showed the rows are `<tr id="area code">` **without onclick**; ibon's script attaches the handler later, and the helper clicked 0.43 s after load. The helper loads at document_start, so on DOMContentLoaded it runs before ibon's own setup and clicked before the handler existed | Wait until the number of rows has been stable for 0.15 s and at least 0.1 s after DOMContentLoaded (tickets_hunter also waits for two equal row counts); if nothing changes and no request goes out within 1.2 s, click again another way, at most 3 times, and never again once a request went out (0.9.7) |
 
-### 4.8 速度（0.9.5）
+### 4.8 Speed (0.9.5)
 
-ibon 舊版流程每一步都是一整頁（ASP.NET WebForms），到保留名額之前要換三頁（活動頁 → 票區頁 → 座位/數量頁 → 填資料頁）；KKTIX 的選票頁是單頁應用，按一次下一步就配位。所以 ibon 的時間主要花在等 ibon 一頁一頁回來，這部分工具改不了。助手自己造成的等待在 0.9.5 縮短了：
+ibon's older purchase flow loads a full page for each step (ASP.NET WebForms) and takes three page changes before the seats are held (event page, area page, seat/quantity page, buyer information page); KKTIX uses a single-page app and assigns seats with one Next. Most of the time on ibon goes to waiting for its pages, which a tool cannot change. The waits the helper adds itself were shortened in 0.9.5:
 
-| 做法 | 說明 |
+| How | Detail |
 |---|---|
-| 看網路請求判斷 ibon 的背景更新做完了沒 | alert-hook.js 在頁面環境數頁面自己還沒回來的 XHR、fetch（5 秒以上沒回的不算，多半是常駐連線），請求都回來、畫面 0.15 秒沒變動就按；至少等 0.25 秒讓網頁有時間送出請求。0.9.4 以前固定至少等 0.8 秒 |
-| 頁面一有變動就反應 | 等元素出現改成 MutationObserver，加上每 50 毫秒看一次（封閉 Shadow DOM 裡的變動觀察不到）。0.9.4 以前每 300 毫秒看一次 |
-| 預先建連線 | 開賣前 3 秒、以及開賣後活動頁一載入，加 `<link rel="preconnect" href="https://orders.ibon.com.tw">`，跳到購票頁時省掉 DNS、TCP、TLS 握手 |
-| 頁面開始離開就停手 | 選了票區價格後 0.9.4 以前固定等 4 秒；現在看 `beforeunload`：整頁換掉就停手由新頁面接手，沒換頁就等背景更新回來再往下，不會在正在換頁的舊頁面上動作 |
+| Watch network requests to tell when ibon's background update is done | alert-hook.js counts the page's own pending XHR and fetch calls (calls pending for more than 5 s are ignored, usually long-lived connections); once all are back and the page has not changed for 0.15 s it clicks, waiting at least 0.25 s so the page has time to send its requests. Up to 0.9.4 it waited at least 0.8 s |
+| React as soon as the page changes | Waiting for an element uses a MutationObserver plus a look every 50 ms (changes inside a closed Shadow DOM are not observed). Up to 0.9.4: every 300 ms |
+| Connect early | 3 s before the sale, and when the event page loads after it, adds `<link rel="preconnect" href="https://orders.ibon.com.tw">`, saving DNS, TCP and TLS on the jump to the purchase pages |
+| Stop when the page starts leaving | After picking the area price, 0.9.4 always waited 4 s; now it watches `beforeunload`: if the whole page is replaced it stops and the new page takes over, otherwise it waits for the background update and goes on, so it never acts on a page that is being left |
 
-本機假頁面（沒有網路延遲）實測，各 5 次的中位數：
+Measured on local fake pages (no network delay), median of 5 runs:
 
-| 頁面 | 0.9.4 | 0.9.5 |
+| Page | 0.9.4 | 0.9.5 |
 |---|---|---|
-| 活動頁：載入到點「線上購票」 | 1240 ms | 1042 ms |
-| 票區頁：表格出現到點下去 | 225 ms | 8 ms |
-| 座位/數量頁：載入到按「下一步」 | 843 ms | 291 ms |
-| 填購票資訊頁：載入到按「下一步」 | 797 ms | 247 ms |
+| Event page: load to clicking "Buy online" | 1240 ms | 1042 ms |
+| Area page: table appears to click | 225 ms | 8 ms |
+| Seat/quantity page: load to clicking Next | 843 ms | 291 ms |
+| Buyer information page: load to clicking Next | 797 ms | 247 ms |
 
-紀錄裡每次按下去都寫著「這一頁載入後 N ms」，真站上每一步花多少可以從匯出的紀錄看。
+Every click in the log says "N ms after this page loaded", so the exported log shows how long each step took on the live site.
 
-限制：如果 ibon 的背景更新不是透過網路請求、而是延遲超過 0.25 秒的純前端計時器，這個偵測抓不到（0.9.4 固定等 0.8 秒抓得到）。目前判斷 ibon 是回伺服器更新，還沒在真站驗證。
+Limit: if ibon's background update were a pure front-end timer longer than 0.25 s instead of a network request, this would miss it (0.9.4's fixed 0.8 s would not). ibon appears to update from its server; not yet verified on the live site.
 
-## 五、已知限制
+## 5. Known limits
 
-- 票區頁（UTK0201_000）只用截圖和 tickets_hunter 核對過，沒有結構快照（見 4.5）；驗證問題頁、持卡人驗證頁、確認頁只用網址判斷。
-- 填購票資訊頁只勾同意、按下一步；電話與 Email 由 ibon 的會員資料帶入，沒有的話助手不會填（會停在那頁，頁面程式找不到「下一步」就通知你）。
-- 驗證碼：只辨識有沒有，不讀、不填、不繞過。
-- 張數頁一次只選第一個「購買數量」下拉（單一票種）。有多個票種列時只選第一列。
-- 不會替你點座位圖（自行選位）。購票方式可以選的時候助手選電腦配位；只能自行選位的活動，點了票區之後交給你。
-- 只支援舊版購票流程（`orders.ibon.com.tw/application/UTK02/…`）。ibon 另有新版（`ticket.ibon.com.tw/Event/…`、`/EventBuy/…`，tickets_hunter 有支援），用新版的活動助手不會動作。
-- 關鍵字建議只有在助手進過這個活動的購票頁之後才有票區名稱；活動頁本身多半不寫票區。
-- 最後的確認與付款一律由你自己做。
+- The area page (UTK0201_000) was checked only against a screenshot and tickets_hunter, not a structure snapshot (see 4.5); the verification question page, the cardholder page and the confirmation page are recognised by URL only.
+- On the buyer information page it only ticks the terms box and clicks Next; phone and email come from your ibon member data, and if they are missing the helper does not fill them in (it stops there and tells you when it cannot find Next).
+- CAPTCHAs: it only notices one; it never reads, fills in or bypasses it.
+- The quantity page: only the first "quantity" dropdown is set (one ticket type). With several ticket type rows only the first is set.
+- It does not pick seats on a seat map. When the purchase method can be chosen it picks computer-assigned seats; for events where you must choose seats yourself, it hands over after clicking the area.
+- Only the older purchase flow (`orders.ibon.com.tw/application/UTK02/…`) is supported. ibon also has a newer one (`ticket.ibon.com.tw/Event/…`, `/EventBuy/…`, supported by tickets_hunter); on events using it the helper does nothing.
+- Keyword suggestions include area names only after the helper has been on this event's purchase pages; the event page itself rarely lists the areas.
+- The final confirmation and payment are always yours.
 
-## 六、測試
-
-```
-npm test           # 或直接：node tools/build.mjs --check && node --test 'test/unit/*.test.mjs' test/background.test.mjs test/agent.test.mjs
-```
-
-- `test/unit/`：網址判讀、場次與票區比對、活動資訊整理、重試間隔、對時計算、健檢摘要、黑盒子。
-- `test/background.test.mjs`：假冒 `chrome.*`，走完「排程 → 倒數 → 開賣 → 選票區 → 座位/數量（驗證碼交給你）→ 填資料 → 確認」，檢查階段、重試額度、分頁綁定、訊息白名單。
-- `test/agent.test.mjs`：用 Playwright 開 Chromium，頁面用 `test/fixtures/` 與測試裡的假頁面（結構照真站快照），背景程式用測試函式假冒。需要 Playwright：設環境變數 `PLAYWRIGHT_PATH`，或預設找 `../ticket-sim/tools/node_modules/playwright`，找不到就略過。
-
-## 七、部署與版本
+## 6. Tests
 
 ```
-python3 tools/deploy.py            # 部署到 tools/targets.local.json 裡的每一台
-python3 tools/deploy.py --check    # 只比對各台和這裡是否一致
+npm test           # or: node tools/build.mjs --check && node --test 'test/unit/*.test.mjs' test/background.test.mjs test/agent.test.mjs
 ```
 
-`tools/targets.example.json` 是範本。寫入前把目標資料夾整個複製成「<資料夾>.bak-<舊版本>」，寫完逐一比對 SHA-256；部署後要到 `chrome://extensions` 按重新載入。
+- `test/unit/`: URL parsing, session and area matching, event information, retry intervals, clock sync maths, health summary, black box.
+- `test/background.test.mjs`: fakes `chrome.*` and walks through schedule, countdown, sale, area, seat/quantity (CAPTCHA handed to you), buyer information and confirmation, checking states, retry allowance, tab binding and the message allowlist.
+- `test/agent.test.mjs`: opens Chromium with Playwright on the pages in `test/fixtures/` and fake pages in the tests (built after live-site snapshots), with the background script faked. Needs Playwright: set `PLAYWRIGHT_PATH`, or it looks for `../ticket-sim/tools/node_modules/playwright`; without it these tests are skipped.
 
-版本：`manifest.json` 的 `version`。0.9.0 起改成 kktix 風格的結構；0.8.x 是舊的內容腳本版本（只在 git 歷史裡）。
+## 7. Deploying and versions
 
-## 八、和 tickets_hunter 比較
+```
+python3 tools/deploy.py            # copy to every machine in tools/targets.local.json
+python3 tools/deploy.py --check    # only compare each machine with this folder
+```
 
-照 tickets_hunter 的 `src/platforms/ibon.py`、`src/nodriver_tixcraft.py`（2026-10-16 讀的版本）。
+`tools/targets.example.json` is the template. Before writing, the target folder is copied whole to `<folder>.bak-<old version>`; afterwards every file is checked by SHA-256. Reload the extension in `chrome://extensions` after deploying.
 
-| 項目 | tickets_hunter | 這個助手 |
+Version: `version` in `manifest.json`. 0.9.0 moved to the KKTIX helper's structure; 0.8.x was an older content-script version (only in the git history).
+
+## 8. Compared with tickets_hunter
+
+Based on tickets_hunter's `src/platforms/ibon.py` and `src/nodriver_tixcraft.py` (the version of 2026-10-16).
+
+| | tickets_hunter | This helper |
 |---|---|---|
-| 形式 | Python 程式，用 zendriver（nodriver）透過 CDP 操控瀏覽器 | Chrome 擴充功能，用你已登入的 Chrome |
-| 登入 | 用設定裡的 cookie 自動重新登入 | 用你已登入的 Chrome；被要求登入時交給你 |
-| 到點 | 照本機時間（`refresh_datetime`） | 跟 ibon 伺服器對時、開賣前 90 秒開頁、背景程式到點保險 |
-| 被踢回首頁 | 導回目標頁 | 導回活動頁 |
-| 票區 | 另外從 CDN 抓剩餘張數、直接跳到張數頁（live.map 快速路徑），抓不到再照頁面點 | 照頁面一步一步點 |
-| 票區售完 | 回選區頁換別區 | 同一頁有別的票區就直接改選，沒有就回選區頁換別區 |
-| 接受不連號座位 | 有選項 | 有選項 |
-| 網站的 alert | 用 CDP 接住 | 等結果的那幾秒接管，平常照常跳出 |
-| 驗證碼 | ddddocr 辨識後自動送出 | 停手交給你（ibon 客服回覆：不得規避驗證機制） |
-| 驗證問題、持卡人驗證 | 用設定裡的答案字典自動作答、自動填卡號前幾碼（`nodriver_ibon_verification_question`、`nodriver_ibon_card_vaildate`） | 0.9.8 起：驗證問題頁照「會員代碼」填入（支援「末N碼／前N碼」截取）；持卡人頁填「卡號前幾碼」。使用者確認 ibon 客服允許 |
-| 新版購票頁（`ticket.ibon.com.tw/Event/…`、`/EventBuy/…`） | 支援 | 不支援 |
-| 頁面結構 | 針對 ibon 長期維護 | 座位/數量頁、填資料頁用真站快照核對；票區頁照 tickets_hunter 與截圖，0.9.2 實測走得通 |
+| Form | A Python program driving the browser over CDP with zendriver (nodriver) | A Chrome extension in the Chrome you are logged in to |
+| Login | Logs in again with the cookie from its settings | Uses your logged-in Chrome; hands over when asked to log in |
+| Timing | Local clock (`refresh_datetime`) | Clock synced with ibon's servers, page opened 90 s early, background safety net |
+| Sent back to the home page | Goes back to the target page | Goes back to the event page |
+| Areas | Fetches seats left from the CDN and jumps straight to the quantity page (live.map fast path), clicks through the pages if that fails | Clicks through the pages |
+| Area sold out | Goes back to the area page for another | Picks another area on the same page if there is one, otherwise goes back to the area page |
+| Non-adjacent seats | Option | Option |
+| Site alerts | Caught over CDP | Taken over for the seconds it waits for a result, shown as usual otherwise |
+| CAPTCHA | Read with ddddocr and submitted | Stops and hands over to you (ibon: verification must not be bypassed) |
+| Verification questions, cardholder check | Answered from a dictionary in its settings, card digits filled in (`nodriver_ibon_verification_question`, `nodriver_ibon_card_vaildate`) | Since 0.9.8: member codes filled in on the question page ("last N / first N digits" cut), card digits on the cardholder page. Confirmed as allowed with ibon customer service |
+| Newer purchase pages (`ticket.ibon.com.tw/Event/…`, `/EventBuy/…`) | Supported | Not supported |
+| Page structure | Maintained for ibon over a long time | Seat/quantity and buyer information pages checked against live-site snapshots; area page after tickets_hunter and a screenshot, worked in a 0.9.2 test |
+
+## 9. License
+
+MIT, see [LICENSE](LICENSE). Use it within ibon's terms of service and the law; it is meant for buying your own tickets, not for resale or buying on behalf of others.

@@ -1,6 +1,7 @@
 {
   "name": "ibon-ticket-helper",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "build": "node tools/build.mjs",
